@@ -14,16 +14,21 @@ build are ours; only PaddleOCR's Apache-2.0 `deploy/lite` post-processing is ven
 
 ## Published artifacts (`ocr-models-v1`)
 
+Release assets are a flat namespace (GitHub rewrites `/` to `.`), so the ABI is a name prefix:
+
 ```
 manifest.json
-lib/arm64-v8a/libpaddle_ocr.so        lib/arm64-v8a/libomp.so        lib/arm64-v8a/libc++_shared.so
-lib/armeabi-v7a/libpaddle_ocr.so      lib/armeabi-v7a/libomp.so      lib/armeabi-v7a/libc++_shared.so
-models/ppocrv4_det.nb
-models/ppocrv4_japan_rec.nb
-models/ppocrv4_japan_dict.txt
+arm64-v8a_libpaddle_ocr.so        arm64-v8a_libomp.so        arm64-v8a_libc++_shared.so
+armeabi-v7a_libpaddle_ocr.so      armeabi-v7a_libomp.so      armeabi-v7a_libc++_shared.so
+ppocrv4_det.nb
+ppocrv4_japan_rec.nb
+ppocrv4_japan_dict.txt
 ```
 
 Base URL: `https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v1`
+Each entry's `path` in `manifest.json` / `app-paddle-manifest.json` is the asset name.
+
+App-side wiring (the four patches that make `:core:ocr` consume this): **[INTEGRATION.md](INTEGRATION.md)**.
 
 ## What `libpaddle_ocr.so` implements
 
@@ -129,6 +134,16 @@ Validated: correct detection + recognition of all five horizontal lines of a syn
 vertical manga-style page, including across pages of different sizes. Not validated: execution on an
 ARM device (no ARM emulator/qemu in the build environment) — the ARM `.so`s and the `arm`-targeted
 models were verified only structurally (ELF/ABI, JNI symbols, `DT_NEEDED`).
+
+## Reproducibility
+
+The build is fully scripted and every input is pinned in `deps.lock.json`, but the outputs are **not
+byte-identical across runs**: Paddle-Lite's `opt` writes a non-deterministic header into the converted
+`.nb` (two conversions of the same model differ at byte 12), and NDK artifacts carry build ids.
+The manifest therefore pins the bytes that were actually published, and both consumers — the Gradle
+`fetchPaddleNativeLibs` task and the app's `ModelDownloader` — verify SHA-256 on every fetch. After
+republishing, regenerate both manifests with `./build.sh --manifest-only` and update the app's
+`core/ocr/paddle-manifest.json`.
 
 ## Licensing
 

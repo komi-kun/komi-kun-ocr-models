@@ -42,11 +42,13 @@ ALL_ABIS=(arm64-v8a armeabi-v7a)
 
 BUILD_HOST=0
 CLEAN=0
+MANIFEST_ONLY=0
 ABIS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host) BUILD_HOST=1 ;;
     --clean) CLEAN=1 ;;
+    --manifest-only) MANIFEST_ONLY=1 ;;
     --abi) shift; ABIS+=("$1") ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -248,15 +250,19 @@ spdx_for() { case "$1" in libc++_shared.so|libomp.so) echo "Apache-2.0 WITH LLVM
 
 MODELS=(ppocrv4_det.nb ppocrv4_japan_rec.nb ppocrv4_japan_dict.txt)
 
-json_entries() { # produce JSON entries into stdout
-  local first=1 path abi
+json_entries() { # [$1=1 to omit libc++_shared.so]
+  local omit_libcxx="${1:-0}"
+  local first=1 abi
   for abi in "${ABIS[@]}"; do
     for so in libpaddle_ocr.so libomp.so libc++_shared.so; do
+      [[ "$so" == "libc++_shared.so" && "$omit_libcxx" == "1" ]] && continue
       local f="$OUT/lib/$abi/$so"
       [[ -f "$f" ]] || continue
       [[ $first -eq 0 ]] && echo ","
       first=0
-      printf '    { "abi": "%s", "name": "%s", "path": "lib/%s/%s", "sha256": "%s", "size": %s, "spdx": "%s" }' \
+      # Release assets are a flat namespace (GitHub rewrites '/' to '.'), so `path` is the asset
+      # name; the build-time fetch task builds the URL from it.
+      printf '    { "abi": "%s", "name": "%s", "path": "%s_%s", "sha256": "%s", "size": %s, "spdx": "%s" }' \
         "$abi" "$so" "$abi" "$so" "$(sha256 "$f")" "$(size_of "$f")" "$(spdx_for "$so")"
     done
   done
@@ -265,7 +271,7 @@ json_entries() { # produce JSON entries into stdout
     [[ -f "$f" ]] || continue
     [[ $first -eq 0 ]] && echo ","
     first=0
-    printf '    { "name": "%s", "path": "models/%s", "sha256": "%s", "size": %s, "spdx": "Apache-2.0" }' \
+    printf '    { "name": "%s", "path": "%s", "sha256": "%s", "size": %s, "spdx": "Apache-2.0" }' \
       "$m" "$m" "$(sha256 "$f")" "$(size_of "$f")"
   done
 }
@@ -279,7 +285,6 @@ write_manifests() {
     echo "{"
     echo "  \"release\": \"ocr-models-v1\","
     echo "  \"baseUrl\": \"$BASE_URL\","
-    echo "  \"abi\": [$(printf '"%s", ' "${ABIS[@]}" | sed 's/, $//')],"
     echo "  \"files\": ["
     json_entries
     echo
@@ -290,14 +295,18 @@ write_manifests() {
   {
     echo "{"
     echo "  \"_comment\": ["
-    echo "    \"Consumed by :core:ocr:fetchPaddleNativeLibs (contract §1.7). sha256 must match the files\"."
-    echo "    \"published in $BASE_URL. See the integration notes in the artifact repo README.\""
+    echo "    \"Consumed by :core:ocr:fetchPaddleNativeLibs. sha256 must match the file published at\","
+    echo "    \"<baseUrl>/<path>. Regenerate with build.sh --manifest-only if the release is republished.\","
+    echo "    \"libc++_shared.so is deliberately NOT listed: AGP already packages the NDK copy for any\","
+    echo "    \"module built with -DANDROID_STL=c++_shared (:core:dictionary), and a second copy in\","
+    echo "    \"jniLibs fails the app merge with a duplicate-path error. Re-add the release's\","
+    echo "    \"libc++_shared.so entries only if no other module provides it.\""
     echo "  ],"
     echo "  \"release\": \"ocr-models-v1\","
     echo "  \"baseUrl\": \"$BASE_URL\","
     echo "  \"abi\": [$(printf '"%s", ' "${ABIS[@]}" | sed 's/, $//')],"
     echo "  \"files\": ["
-    json_entries
+    json_entries 1
     echo
     echo "  ],"
     echo "  \"models\": {"
@@ -311,6 +320,10 @@ write_manifests() {
 }
 
 main() {
+  if [[ $MANIFEST_ONLY -eq 1 ]]; then
+    write_manifests
+    return 0
+  fi
   local ndk=""
   if [[ ${#ABIS[@]} -gt 0 ]]; then ndk="$(find_ndk)"; fi
   download_deps
