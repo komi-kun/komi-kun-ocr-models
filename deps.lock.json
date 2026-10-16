@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: Apache-2.0
+// Pinned inputs for the PaddleOCR native artifact. `build.sh` fetches exactly these URLs;
+// `sha256` values were recorded from the artifacts actually used to produce `ocr-models-v1`.
+{
+  "release": "ocr-models-v1",
+  "paddle_lite": {
+    "version": "v2.14-rc",
+    "repository": "https://github.com/PaddlePaddle/Paddle-Lite",
+    "license": "Apache-2.0",
+    "opt_linux_x86": {
+      "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/opt_linux_x86",
+      "sha256": "cb0053c2e5ce4624a629b71be1c5195d2dd38f7846b596550339f92736bef0e1"
+    },
+    "android": {
+      "arm64-v8a": {
+        "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.android.armv8.clang.c++_shared.with_extra.tar.gz",
+        "sha256": "cb6a03060fa10676f7f599aed41efdcc48bbcee9779c24499afcde111313be03"
+      },
+      "armeabi-v7a": {
+        "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.android.armv7.clang.c++_shared.with_extra.tar.gz",
+        "sha256": "884ac68909e76c79a1cf4be276dbdd7c55633bf2e8052e8594a2041844ff63b0"
+      },
+      "x86_64": {
+        "url": null,
+        "sha256": null,
+        "note": "Paddle-Lite publishes no Android x86_64 prebuilt (see README: ABI support)."
+      }
+    },
+    "host_x86_64_validation": {
+      "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.x86.linux.tar.gz",
+      "sha256": "a6a8f7f45b69479f752f7e52eee5836eb8d05573a3d7f078063b93634b5f06aa"
+    }
+  },
+  "opencv_mobile": {
+    "version": "v36 / OpenCV 4.13.0",
+    "repository": "https://github.com/nihui/opencv-mobile",
+    "license": "Apache-2.0 (OpenCV itself: Apache-2.0)",
+    "android": {
+      "url": "https://github.com/nihui/opencv-mobile/releases/download/v36/opencv-mobile-4.13.0-android.zip",
+      "sha256": "56735469e0c344253122cbc66f5e69e5f3b2c131a0f892eb68fa5530be763b83"
+    },
+    "host_x86_64_validation": {
+      "url": "https://github.com/nihui/opencv-mobile/releases/download/v36/opencv-mobile-4.13.0-ubuntu-2404.zip",
+      "sha256": "f556a633db7addf1d4c8ea0dd4fb7a431ef9a3f32f7d9c028e702d2779dac0ed"
+    }
+  },
+  "clipper": {
+    "version": "6.4.2",
+    "license": "Boost Software License 1.0",
+    "url_hpp": "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.hpp",
+    "sha256_hpp": "734eba9dc9d399089b2b467017074bd24728a1b9e64c7429e827806ed10e54cc",
+    "url_cpp": "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.cpp",
+    "sha256_cpp": "1011595441412e429f47630578f5caaecdc5a4108f9ed05a77b848d952e5127c"
+  },
+  "paddleocr": {
+    "repository": "https://github.com/PaddlePaddle/PaddleOCR",
+    "reference_revision": "v2.7.0",
+    "license": "Apache-2.0",
+    "models": {
+      "detection": {
+        "name": "ch_PP-OCRv4_det_infer",
+        "url": "https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar",
+        "sha256": "5f7217e0a89612e2f80d62f3c99a8bf5f7ae9cdc1ffd706be7dde07765627edf"
+      },
+      "recognition": {
+        "name": "japan_PP-OCRv4_rec_infer",
+        "url": "https://paddleocr.bj.bcebos.com/PP-OCRv4/multilingual/japan_PP-OCRv4_rec_infer.tar",
+        "sha256": "b8696d8307cf3b9094f582e4b1d2030053e9c8419b51d7c325faddd4d78c5a8a"
+      },
+      "dictionary": {
+        "name": "japan_dict.txt",
+        "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/v2.7.0/ppocr/utils/dict/japan_dict.txt",
+        "sha256": "1dcfcb41eec90576a945b3084f22ade11ced506e24f14879245b071698f308e8"
+      }
+    }
+  },
+  "android_ndk": {
+    "version": "29.0.14206865 (r29)",
+    "provided_runtime_libraries": ["libomp.so", "libc++_shared.so"],
+    "license": "Apache-2.0 WITH LLVM-exception"
+  }
+}
