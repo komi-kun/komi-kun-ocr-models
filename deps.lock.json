@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Pinned inputs for the PaddleOCR native artifact. `build.sh` fetches exactly these URLs;
-// `sha256` values were recorded from the artifacts actually used to produce `ocr-models-v1`.
+// `sha256` values were recorded from the artifacts actually used to produce `ocr-models-v2`.
 {
-  "release": "ocr-models-v1",
+  "release": "ocr-models-v2",
   "paddle_lite": {
     "version": "v2.14-rc",
     "repository": "https://github.com/PaddlePaddle/Paddle-Lite",
     "license": "Apache-2.0",
-    "opt_linux_x86": {
-      "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/opt_linux_x86",
-      "sha256": "cb0053c2e5ce4624a629b71be1c5195d2dd38f7846b596550339f92736bef0e1"
-    },
     "android": {
       "arm64-v8a": {
         "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.android.armv8.clang.c++_shared.with_extra.tar.gz",
@@ -54,23 +50,37 @@
   },
   "paddleocr": {
     "repository": "https://github.com/PaddlePaddle/PaddleOCR",
-    "reference_revision": "v2.7.0",
+    "reference_revision": "v3.0.0 (PP-OCRv5)",
     "license": "Apache-2.0",
+    "note": [
+      "PP-OCRv5's official inference models are published only as PaddlePaddle 3.x PIR",
+      "(inference.json + inference.pdiparams), which Paddle-Lite's `opt` 2.14-rc cannot parse",
+      "(it requires a .pdmodel). We therefore consume PaddlePaddle's own pre-converted",
+      "Paddle-Lite naive-buffer models, built for Paddle-Lite v2.14-rc, from Paddle-Lite-Demo's",
+      "`feature/paddle-x` branch (PaddleOCR's on-device deployment guide). Their .nb header",
+      "records 'v2.14-rc', matching the runtime this build links. Published under flat names",
+      "ppocrv5_det.nb / ppocrv5_rec.nb / ppocrv5_dict.txt; the extracted-file sha256 is what the",
+      "release manifest pins."
+    ],
     "models": {
       "detection": {
-        "name": "ch_PP-OCRv4_det_infer",
-        "url": "https://paddleocr.bj.bcebos.com/PP-OCRv4/chinese/ch_PP-OCRv4_det_infer.tar",
-        "sha256": "5f7217e0a89612e2f80d62f3c99a8bf5f7ae9cdc1ffd706be7dde07765627edf"
+        "name": "PP-OCRv5_mobile_det.nb",
+        "url": "https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models/PP-OCRv5_mobile_det.tar.gz",
+        "sha256_targz": "18be2328b19936bb8bbef48ffeb3f5214e58c26acd47bb64681f2f52dc7b8fa4",
+        "sha256_extracted": "bee84fdb3d7c5f312a797da81f2dd44c89088c08e1f58a51044a823cddfbd90c"
       },
       "recognition": {
-        "name": "japan_PP-OCRv4_rec_infer",
-        "url": "https://paddleocr.bj.bcebos.com/PP-OCRv4/multilingual/japan_PP-OCRv4_rec_infer.tar",
-        "sha256": "b8696d8307cf3b9094f582e4b1d2030053e9c8419b51d7c325faddd4d78c5a8a"
+        "name": "PP-OCRv5_mobile_rec.nb",
+        "url": "https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models/PP-OCRv5_mobile_rec.tar.gz",
+        "sha256_targz": "6385dad9a2272b0180b9f44f49c08feed5ffa777a4f8658e25d9db39636ab2b3",
+        "sha256_extracted": "9d073b3ee01deee358bf929dd8952d4d355c9545f4a93d8070605581b4c21c0c",
+        "note": "Unified recogniser: Simplified/Traditional Chinese, Pinyin, English and Japanese in one model (the v5 Japanese model)."
       },
       "dictionary": {
-        "name": "japan_dict.txt",
-        "url": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/v2.7.0/ppocr/utils/dict/japan_dict.txt",
-        "sha256": "1dcfcb41eec90576a945b3084f22ade11ced506e24f14879245b071698f308e8"
+        "name": "ppocr_keys_ocrv5.txt",
+        "url": "https://paddlelite-demo.bj.bcebos.com/demo/ocr/labels/labels.tar.gz",
+        "sha256_targz": "deaf9d44b671ee4edb3a2e1747844624e211d1a24ef641e8336147fa046edb8a",
+        "sha256_extracted": "17665d27ed39f0deb82007859992d626d3105d0ee4578c120b7c72138dc04d05"
       }
     }
   },

@@ -32,8 +32,14 @@ LITE_BASE="https://github.com/PaddlePaddle/Paddle-Lite/releases/download/$LITE_T
 OCV_TAG="v36"
 OCV_BASE="https://github.com/nihui/opencv-mobile/releases/download/$OCV_TAG"
 OCV_VERSION="4.13.0"
-PADDLEOCR_MODEL_BASE="https://paddleocr.bj.bcebos.com/PP-OCRv4"
-PADDLEOCR_DICT_BASE="https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/v2.7.0/ppocr/utils/dict"
+# PP-OCRv5 mobile models (det + unified rec covering Japanese), as officially pre-converted to the
+# Paddle-Lite naive-buffer format by the PaddlePaddle team for `Paddle-Lite-Demo`'s
+# `feature/paddle-x` branch (the "PaddleX-Lite-Deploy" of PaddleOCR's on-device guide). PaddleOCR's
+# own PP-OCRv5 inference tars ship PaddlePaddle 3.x PIR (`inference.json`), which `opt` 2.14-rc
+# cannot parse, so we consume the official `.nb` bytes directly and pin their SHA-256 in
+# deps.lock.json. The `.nb` header records `v2.14-rc`, i.e. the exact opt/runtime we link.
+V5_NB_BASE="https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models"
+V5_LABELS_URL="https://paddlelite-demo.bj.bcebos.com/demo/ocr/labels/labels.tar.gz"
 
 # ABIs built from a Paddle-Lite prebuilt release. `x86_64` has no upstream prebuilt (Paddle-Lite
 # ships armv7/armv8 for Android only) and would additionally need x86-targeted models -- see
@@ -91,13 +97,12 @@ download_deps() {
       *) echo "no Paddle-Lite prebuilt for $abi" >&2; exit 1 ;;
     esac
   done
-  fetch "$LITE_BASE/opt_linux_x86" "$DL/opt_linux_x86"
   fetch "$OCV_BASE/opencv-mobile-$OCV_VERSION-android.zip" "$DL/opencv-mobile-android.zip"
   fetch "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.hpp" "$DL/clipper.hpp"
   fetch "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.cpp" "$DL/clipper.cpp"
-  fetch "$PADDLEOCR_MODEL_BASE/chinese/ch_PP-OCRv4_det_infer.tar" "$DL/ch_PP-OCRv4_det_infer.tar"
-  fetch "$PADDLEOCR_MODEL_BASE/multilingual/japan_PP-OCRv4_rec_infer.tar" "$DL/japan_PP-OCRv4_rec_infer.tar"
-  fetch "$PADDLEOCR_DICT_BASE/japan_dict.txt" "$DL/japan_dict.txt"
+  fetch "$V5_NB_BASE/PP-OCRv5_mobile_det.tar.gz" "$DL/ppocrv5_mobile_det.tar.gz"
+  fetch "$V5_NB_BASE/PP-OCRv5_mobile_rec.tar.gz" "$DL/ppocrv5_mobile_rec.tar.gz"
+  fetch "$V5_LABELS_URL" "$DL/labels.tar.gz"
 
   if [[ $BUILD_HOST -eq 1 ]]; then
     fetch "$LITE_BASE/inference_lite_lib.x86.linux.tar.gz" "$DL/lite.x86.linux.tar.gz"
@@ -131,33 +136,18 @@ download_deps() {
 # ---------------------------------------------------------------------------------------------
 # models
 # ---------------------------------------------------------------------------------------------
-convert_models() {
-  local opt="$DL/opt_linux_x86"
-  chmod +x "$opt"
-  local tmp="$WORK/modelconv"
+stage_models() {
+  local tmp="$WORK/models-native"
   mkdir -p "$tmp"
-  [[ -d "$tmp/ch_PP-OCRv4_det_infer" ]] || tar -xf "$DL/ch_PP-OCRv4_det_infer.tar" -C "$tmp"
-  [[ -d "$tmp/japan_PP-OCRv4_rec_infer" ]] || tar -xf "$DL/japan_PP-OCRv4_rec_infer.tar" -C "$tmp"
+  [[ -f "$tmp/PP-OCRv5_mobile_det.nb" ]] || tar -xf "$DL/ppocrv5_mobile_det.tar.gz" -C "$tmp"
+  [[ -f "$tmp/PP-OCRv5_mobile_rec.nb" ]] || tar -xf "$DL/ppocrv5_mobile_rec.tar.gz" -C "$tmp"
+  [[ -f "$tmp/ppocr_keys_ocrv5.txt" ]] || tar -xf "$DL/labels.tar.gz" -C "$tmp" ppocr_keys_ocrv5.txt
 
-  # PaddleOCR's models are Apache-2.0; `opt` converts Paddle inference graphs to the Paddle-Lite
-  # naive-buffer format the mobile runtime loads. `valid_targets=arm` is PaddleOCR's own choice
-  # for the official `.nb` models; the resulting graph is ARM-specific (see README).
-  "$opt" --model_dir="$tmp/ch_PP-OCRv4_det_infer" --optimize_out="$OUT/models/ppocrv4_det" \
-         --optimize_out_type=naive_buffer --valid_targets=arm >/dev/null
-  "$opt" --model_dir="$tmp/japan_PP-OCRv4_rec_infer" --optimize_out="$OUT/models/ppocrv4_japan_rec" \
-         --optimize_out_type=naive_buffer --valid_targets=arm >/dev/null
-  cp -f "$DL/japan_dict.txt" "$OUT/models/ppocrv4_japan_dict.txt"
-
-  # Validation aid only: x86_64-targeted conversions of the same models, so the host harness can
-  # exercise the identical engine sources off-device. NOT published (see README).
-  if [[ $BUILD_HOST -eq 1 ]]; then
-    mkdir -p "$OUT/models-x86"
-    "$opt" --model_dir="$tmp/ch_PP-OCRv4_det_infer" --optimize_out="$OUT/models-x86/ppocrv4_det" \
-           --optimize_out_type=naive_buffer --valid_targets=x86 >/dev/null
-    "$opt" --model_dir="$tmp/japan_PP-OCRv4_rec_infer" --optimize_out="$OUT/models-x86/ppocrv4_japan_rec" \
-           --optimize_out_type=naive_buffer --valid_targets=x86 >/dev/null
-    cp -f "$DL/japan_dict.txt" "$OUT/models-x86/ppocrv4_japan_dict.txt"
-  fi
+  # Published under komi-kun's own flat names; byte-identical to the official PaddlePaddle `.nb`
+  # (sha256 pinned in deps.lock.json and re-verified against the release manifest at runtime).
+  cp -f "$tmp/PP-OCRv5_mobile_det.nb" "$OUT/models/ppocrv5_det.nb"
+  cp -f "$tmp/PP-OCRv5_mobile_rec.nb" "$OUT/models/ppocrv5_rec.nb"
+  cp -f "$tmp/ppocr_keys_ocrv5.txt" "$OUT/models/ppocrv5_dict.txt"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -248,7 +238,7 @@ size_of() { stat -c '%s' "$1"; }
 # libraries are Apache-2.0 WITH LLVM-exception (libc++, the LLVM OpenMP runtime).
 spdx_for() { case "$1" in libc++_shared.so|libomp.so) echo "Apache-2.0 WITH LLVM-exception" ;; *) echo "Apache-2.0" ;; esac; }
 
-MODELS=(ppocrv4_det.nb ppocrv4_japan_rec.nb ppocrv4_japan_dict.txt)
+MODELS=(ppocrv5_det.nb ppocrv5_rec.nb ppocrv5_dict.txt)
 
 json_entries() { # [$1=1 to omit libc++_shared.so]
   local omit_libcxx="${1:-0}"
@@ -276,14 +266,14 @@ json_entries() { # [$1=1 to omit libc++_shared.so]
   done
 }
 
-BASE_URL="https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v1"
+BASE_URL="https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v2"
 
 # The release manifest is what `ModelDownloader` fetches at runtime; the app manifest is the copy
 # that lives at `core/ocr/paddle-manifest.json` and drives the build-time fetch task.
 write_manifests() {
   {
     echo "{"
-    echo "  \"release\": \"ocr-models-v1\","
+    echo "  \"release\": \"ocr-models-v2\","
     echo "  \"baseUrl\": \"$BASE_URL\","
     echo "  \"files\": ["
     json_entries
@@ -302,7 +292,7 @@ write_manifests() {
     echo "    \"jniLibs fails the app merge with a duplicate-path error. Re-add the release's\","
     echo "    \"libc++_shared.so entries only if no other module provides it.\""
     echo "  ],"
-    echo "  \"release\": \"ocr-models-v1\","
+    echo "  \"release\": \"ocr-models-v2\","
     echo "  \"baseUrl\": \"$BASE_URL\","
     echo "  \"abi\": [$(printf '"%s", ' "${ABIS[@]}" | sed 's/, $//')],"
     echo "  \"files\": ["
@@ -310,9 +300,9 @@ write_manifests() {
     echo
     echo "  ],"
     echo "  \"models\": {"
-    echo "    \"det\": [\"ppocrv4_det.nb\"],"
-    echo "    \"rec\": [\"ppocrv4_japan_rec.nb\"],"
-    echo "    \"dict\": [\"ppocrv4_japan_dict.txt\"]"
+    echo "    \"det\": [\"ppocrv5_det.nb\"],"
+    echo "    \"rec\": [\"ppocrv5_rec.nb\"],"
+    echo "    \"dict\": [\"ppocrv5_dict.txt\"]"
     echo "  }"
     echo "}"
   } > "$OUT/app-paddle-manifest.json"
@@ -327,7 +317,7 @@ main() {
   local ndk=""
   if [[ ${#ABIS[@]} -gt 0 ]]; then ndk="$(find_ndk)"; fi
   download_deps
-  convert_models
+  stage_models
   if [[ -n "$ndk" ]]; then
     build_android "$ndk"
     stage_runtime_libs "$ndk"
@@ -341,13 +331,9 @@ main() {
   find "$OUT" -type f | sort
   if [[ $BUILD_HOST -eq 1 ]]; then
     echo
-    if command -v python3 >/dev/null && python3 "$ROOT/tests/make_pages.py" "$ROOT/tests" >/dev/null 2>&1; then
-      echo "Host harness smoke test (x86 validation models, synthetic page):"
-      "$OUT/paddle_ocr_host" "$OUT/models-x86/ppocrv4_det.nb" "$OUT/models-x86/ppocrv4_japan_rec.nb" \
-        "$OUT/models-x86/ppocrv4_japan_dict.txt" "$ROOT/tests/page_horizontal.ppm" 2>/dev/null | head -6 || true
-    else
-      echo "[warn] Pillow/CJK font unavailable; skipping the host smoke test" >&2
-    fi
+    echo "[info] host harness built at $OUT/paddle_ocr_host (toolchain check only)."
+    echo "[info] PP-OCRv5 ships only as arm-targeted .nb, so the offline conformance run"
+    echo "[info] (which needs x86-targeted models) is skipped for this release; see README."
   fi
 }
 
