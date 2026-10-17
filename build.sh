@@ -263,20 +263,24 @@ build_host() {
 }
 
 # ---------------------------------------------------------------------------------------------
-# NDK runtime library (libc++_shared.so — the only runtime dep of our shim)
+# NDK runtime libraries (libc++_shared.so + libomp.so — both are DT_NEEDED of our shim)
 # ---------------------------------------------------------------------------------------------
 stage_runtime_libs() {
   local ndk="$1"
   local tcdir="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
+  local clang_ver; clang_ver="$(ls "$tcdir/lib/clang" | sort -V | tail -1)"
   for abi in "${ABIS[@]}"; do
-    local triple
+    local triple clang_arch
     case "$abi" in
-      arm64-v8a) triple="aarch64-linux-android" ;;
-      armeabi-v7a) triple="arm-linux-androideabi" ;;
-      x86_64) triple="x86_64-linux-android" ;;
+      arm64-v8a) triple="aarch64-linux-android"; clang_arch="aarch64" ;;
+      armeabi-v7a) triple="arm-linux-androideabi"; clang_arch="arm" ;;
+      x86_64) triple="x86_64-linux-android"; clang_arch="x86_64" ;;
     esac
     mkdir -p "$OUT/lib/$abi"
     cp -f "$tcdir/sysroot/usr/lib/$triple/libc++_shared.so" "$OUT/lib/$abi/libc++_shared.so"
+    # opencv-mobile's `parallel_for_` is what needs OpenMP (ONNX Runtime has its own pool), but
+    # `libpaddle_ocr.so` still carries a DT_NEEDED on it, so it must ship alongside the shim.
+    cp -f "$tcdir/lib/clang/$clang_ver/lib/linux/$clang_arch/libomp.so" "$OUT/lib/$abi/libomp.so"
   done
 }
 
@@ -287,14 +291,14 @@ stage_runtime_libs() {
 # models are Apache-2.0; the NDK libc++ is Apache-2.0 WITH LLVM-exception.
 spdx_for() {
   case "$1" in
-    libc++_shared.so) echo "Apache-2.0 WITH LLVM-exception" ;;
+    libc++_shared.so|libomp.so) echo "Apache-2.0 WITH LLVM-exception" ;;
     libonnxruntime.so) echo "MIT" ;;
     *) echo "Apache-2.0" ;;
   esac
 }
 
 MODELS=(ppocrv6_small_det.onnx ppocrv6_small_rec.onnx ppocrv6_small_dict.txt)
-NATIVE_LIBS=(libpaddle_ocr.so libonnxruntime.so libc++_shared.so)
+NATIVE_LIBS=(libpaddle_ocr.so libonnxruntime.so libomp.so libc++_shared.so)
 RELEASE="ocr-models-v3"
 BASE_URL="https://github.com/komi-kun/komi-kun-ocr-models/releases/download/$RELEASE"
 
