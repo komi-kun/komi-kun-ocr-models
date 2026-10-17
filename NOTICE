@@ -43,6 +43,20 @@ Components
   https://android.googlesource.com/platform/ndk/
 
 ---------------------------------------------------------------------------------------------
+Superseded releases
+
+The `NOTICE` above lists what **`ocr-models-v3`** (the current release) ships. The earlier releases
+run on a different backend and shipped different components; they are kept for history only and are
+superseded by `ocr-models-v3`:
+
+* `ocr-models-v2` — Paddle-Lite v2.14-rc (Apache-2.0) + PP-OCRv5 mobile models (Apache-2.0).
+* `ocr-models-v1` — Paddle-Lite v2.14-rc (Apache-2.0) + PP-OCRv4 models (Apache-2.0).
+
+Their authoritative component list is the `NOTICE` at their tags
+(`git show ocr-models-v1:NOTICE`, `git show ocr-models-v2:NOTICE`). Neither release is withdrawn and
+neither tag is moved.
+
+---------------------------------------------------------------------------------------------
 Notes
 
 `libpaddle_ocr.so` is a combined work that statically links opencv-mobile and Clipper, dynamically

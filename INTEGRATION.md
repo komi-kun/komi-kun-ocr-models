@@ -10,6 +10,11 @@ Published release:
 `https://github.com/komi-kun/komi-kun-ocr-models/releases/tag/ocr-models-v3`
 Base URL: `https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v3`
 
+This document describes only the **current `ocr-models-v3`** drop-in. The `v1`/`v2` releases
+(Paddle-Lite) stay published for history and are superseded; the authoritative docs for them are the
+files at their tags (`git show ocr-models-v2:INTEGRATION.md`). The diff blocks below show the v2
+(Paddle-Lite) state as the `-` side because that is what an app on `ocr-models-v2` still has.
+
 ---
 
 ## 1. `core/ocr/paddle-manifest.json` — replace the whole file with

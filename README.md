@@ -15,15 +15,43 @@ ours; only PaddleOCR's Apache-2.0 `deploy/lite` post-processing is vendored.
 
 ## Releases
 
-| Release | Backend | Models | ABIs |
-|---|---|---|---|
-| **`ocr-models-v3`** (current) | **ONNX Runtime 1.31.0** | **PP-OCRv6 small** — `ppocrv6_small_det.onnx` + `ppocrv6_small_rec.onnx` + `ppocrv6_small_dict.txt` | `arm64-v8a`, `armeabi-v7a`, **`x86_64`** |
-| `ocr-models-v2` | Paddle-Lite v2.14-rc | PP-OCRv5 mobile (`ppocrv5_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
-| `ocr-models-v1` | Paddle-Lite v2.14-rc | PP-OCRv4 (`ppocrv4_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
+| Release | Status | Backend | Models | ABIs |
+|---|---|---|---|---|
+| **`ocr-models-v3`** | **current** | **ONNX Runtime 1.31.0** | **PP-OCRv6 small** — `ppocrv6_small_det.onnx` + `ppocrv6_small_rec.onnx` + `ppocrv6_small_dict.txt` | `arm64-v8a`, `armeabi-v7a`, **`x86_64`** |
+| `ocr-models-v2` | superseded | Paddle-Lite v2.14-rc | PP-OCRv5 mobile (`ppocrv5_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
+| `ocr-models-v1` | superseded | Paddle-Lite v2.14-rc | PP-OCRv4 (`ppocrv4_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
 
-The `v1`/`v2` releases are kept intact for history. `v3` is a backend swap **and** a model bump:
-ONNX Runtime replaces Paddle-Lite (so all three ABIs — including `x86_64` — are first-class), and
-PP-OCRv6 small replaces PP-OCRv5 mobile.
+`v3` is a backend swap **and** a model bump: ONNX Runtime replaces Paddle-Lite (so all three ABIs —
+including `x86_64` — are first-class), and PP-OCRv6 small replaces PP-OCRv5 mobile.
+
+### Superseded releases (`ocr-models-v1`, `ocr-models-v2`)
+
+Both are **superseded** by `ocr-models-v3` and are kept only for history: the releases and their
+tags stay intact, and the app deletes the old model files on upgrade
+(`ModelDownloader.cleanupStaleModels()`). They ran on **Paddle-Lite v2.14-rc** (the `opt`
+`naive_buffer` converter + prebuilt Android inference libraries) and were **ARM-only** —
+Paddle-Lite publishes no Android `x86_64` prebuilt and its converted models are target-specific, so
+there was no `x86_64` entry:
+
+* `ocr-models-v1` — PP-OCRv4: `ppocrv4_det.nb`, `ppocrv4_japan_rec.nb`, `ppocrv4_japan_dict.txt`.
+* `ocr-models-v2` — PP-OCRv5 mobile: `ppocrv5_det.nb`, `ppocrv5_rec.nb`, `ppocrv5_dict.txt`.
+
+The Paddle-Lite build material for them — the former `build.sh`/`CMakeLists.txt`, the `opt`
+conversion step, the x86_64 caveat and the `.nb` pipeline notes — is **not deleted, it is preserved
+in those tags** and is the accurate description of those releases:
+
+```bash
+git show ocr-models-v1:README.md      # Paddle-Lite build, `.nb` models, ARM-only ABIs
+git show ocr-models-v1:build.sh       # the `opt` conversion + Paddle-Lite prebuilt fetch
+git show ocr-models-v1:NOTICE         # the component list those releases shipped
+git diff ocr-models-v2..main          # the full Paddle-Lite → ONNX Runtime change
+```
+
+`main` (this README, `NOTICE`, `deps.lock.json`, `CMakeLists.txt`, `build.sh`) describes **only the
+current `ocr-models-v3` build**. For `v1`/`v2` the authoritative documents are the files at their
+tags, not this branch. The one Paddle-Lite caveat worth remembering is that `opt` wrote a
+non-deterministic header into the converted `.nb`, so those releases were never byte-reproducible
+(the current v3 build does not use `opt` at all — see [Reproducibility](#reproducibility)).
 
 ## Published artifacts (`ocr-models-v3`)
 
