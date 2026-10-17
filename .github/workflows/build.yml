@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Rebuilds the artifact from pinned inputs and attaches it to the `ocr-models-v1` release.
+# Rebuilds the artifact from pinned inputs and attaches it to the `ocr-models-v3` release.
 # Manual dispatch (or a `ocr-models-*` tag) publishes; PRs only build + smoke-test.
 name: build
 
@@ -9,7 +9,7 @@ on:
     inputs:
       release_tag:
         description: Release tag to create/update
-        default: ocr-models-v1
+        default: ocr-models-v3
   push:
     tags:
       - "ocr-models-*"
@@ -27,21 +27,35 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build unzip python3-pil fonts-noto-cjk
+          sudo apt-get install -y cmake ninja-build unzip python3-pip python3-yaml
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build (Android .so for every ABI + models + host harness)
         run: ./build.sh --host
 
-      - name: Smoke-test the engine on synthetic pages
+      - name: Smoke-test the engine on synthetic Japanese pages
         run: |
           python3 tests/make_pages.py tests
-          ./out/paddle_ocr_host \
-            out/models-x86/ppocrv4_det.nb \
-            out/models-x86/ppocrv4_japan_rec.nb \
-            out/models-x86/ppocrv4_japan_dict.txt \
-            tests/page_horizontal.ppm > /tmp/ocr.txt
+          ./out/paddle_ocr_host info \
+            out/models/ppocrv6_small_det.onnx \
+            out/models/ppocrv6_small_rec.onnx \
+            out/models/ppocrv6_small_dict.txt
+          # The harness reads binary PPM (P6), which make_pages.py already writes.
+          ./out/paddle_ocr_host full \
+            out/models/ppocrv6_small_det.onnx \
+            out/models/ppocrv6_small_rec.onnx \
+            out/models/ppocrv6_small_dict.txt \
+            tests/page_horizontal.ppm tests/page_vertical.ppm > /tmp/ocr.txt
+          cat /tmp/ocr.txt
           grep -q "何でも薄暗いじめじめした所で" /tmp/ocr.txt
+
+      - name: Verify the published ABIs
+        run: |
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            test -f "out/lib/$abi/libpaddle_ocr.so"
+            test -f "out/lib/$abi/libonnxruntime.so"
+          done
+          file out/lib/*/libpaddle_ocr.so
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,3 +81,4 @@ jobs:
               gh release upload "$TAG" "out/$path" --clobber
           done < <(python3 -c "import json;m=json.load(open('out/manifest.json'));print('\n'.join(f['path'] for f in m['files']))")
           gh release upload "$TAG" out/manifest.json --clobber
+          gh release upload "$TAG" out/app-paddle-manifest.json --clobber

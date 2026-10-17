@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <numeric>
@@ -14,34 +15,59 @@
 
 #include "crnn_process.h"    // vendored from PaddleOCR deploy/lite (Apache-2.0)
 #include "db_post_process.h" // vendored from PaddleOCR deploy/lite (Apache-2.0)
-
-// NOTE: when linking the *bundled* Paddle-Lite static library
-// (`libpaddle_api_light_bundled.a`) the op/kernel registrars are already inside the archive, so
-// `paddle_use_ops.h` / `paddle_use_kernels.h` must NOT be included (they would be defined twice).
+#include "ort_runtime.h"
 
 #if defined(__ARM_NEON) || defined(__ARM_NEON__)
 #include <arm_neon.h>
 #endif
-
-using paddle::lite_api::CreatePaddlePredictor;
-using paddle::lite_api::MobileConfig;
-using paddle::lite_api::PaddlePredictor;
 
 namespace komikun::ocr {
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-/// Upper bound on the shared recognition input width (keeps one pathological wide box from
-/// forcing every other crop on the page through the same huge tensor).
-constexpr int kMaxRecWidth = 1600;
+/// Upper bound on the recognition input width. Identical to the validated benchmark's `max_w`
+/// (`rec_preprocess(..., max_w=3200)`); keeps one pathological wide crop from allocating a huge
+/// tensor.
+constexpr int kMaxRecWidth = 3200;
 
 double Ms(const Clock::time_point& a, const Clock::time_point& b) {
   return std::chrono::duration<double, std::milli>(b - a).count();
 }
 
 // ---------------------------------------------------------------------------------------------
-// Pre-processing
+// ONNX Runtime handles
+// ---------------------------------------------------------------------------------------------
+
+/// RAII for `OrtValue`.
+struct ValueGuard {
+  const OrtApi* api;
+  OrtValue* value;
+  ~ValueGuard() {
+    if (value != nullptr) api->ReleaseValue(value);
+  }
+};
+
+/// RAII for `OrtTensorTypeAndShapeInfo`.
+struct ShapeGuard {
+  const OrtApi* api;
+  OrtTensorTypeAndShapeInfo* info;
+  ~ShapeGuard() {
+    if (info != nullptr) api->ReleaseTensorTypeAndShapeInfo(info);
+  }
+};
+
+/// RAII for `OrtSessionOptions`.
+struct SessionOptionsGuard {
+  const OrtApi* api;
+  OrtSessionOptions* options;
+  ~SessionOptionsGuard() {
+    if (options != nullptr) api->ReleaseSessionOptions(options);
+  }
+};
+
+// ---------------------------------------------------------------------------------------------
+// Pre-processing (byte-for-byte the validated benchmark, /tmp/opencode/ocr-bench/common.py)
 // ---------------------------------------------------------------------------------------------
 
 // Fills an NCHW float tensor from interleaved NHWC data, applying per-channel mean/scale. The ARM
@@ -87,7 +113,8 @@ void MeanScale(const float* din, float* dout, int size,
 }
 
 // Resizes the page so its longest side is <= max_size_len and both sides are a multiple of 32
-// (the DB backbone's stride). Records the h/w scale factors for mapping boxes back.
+// (the DB backbone's stride), rounding to the nearest multiple exactly like PaddleOCR's
+// `DetResizeForTest` and the benchmark. Records the h/w scale factors for mapping boxes back.
 cv::Mat DetResize(const cv::Mat& img, int max_size_len, std::vector<float>& ratio_hw) {
   const int w = img.cols;
   const int h = img.rows;
@@ -98,14 +125,12 @@ cv::Mat DetResize(const cv::Mat& img, int max_size_len, std::vector<float>& rati
     ratio = static_cast<float>(max_size_len) / static_cast<float>(max_wh);
   }
 
-  const auto round32 = [](int v) {
-    if (v % 32 == 0) return v;
-    if (v / 32 < 1) return 32;
-    return (v / 32) * 32;
+  const auto round32 = [](double v) {
+    return std::max(32, static_cast<int>(std::lround(v / 32.0)) * 32);
   };
 
-  const int resize_h = std::max(round32(static_cast<int>(static_cast<float>(h) * ratio)), 32);
-  const int resize_w = std::max(round32(static_cast<int>(static_cast<float>(w) * ratio)), 32);
+  const int resize_h = round32(static_cast<double>(h) * ratio);
+  const int resize_w = round32(static_cast<double>(w) * ratio);
 
   cv::Mat out;
   cv::resize(img, out, cv::Size(resize_w, resize_h));
@@ -115,26 +140,16 @@ cv::Mat DetResize(const cv::Mat& img, int max_size_len, std::vector<float>& rati
   return out;
 }
 
-// Width the recognition model sees for a given crop (PaddleOCR pads/truncates to this width).
-int RecNaturalWidth(const cv::Mat& crop, int rec_image_height) {
-  if (crop.rows <= 0) return 0;
-  return static_cast<int>(
-      std::ceil(static_cast<float>(rec_image_height) * crop.cols / crop.rows));
-}
-
-// Resizes a crop to `rec_image_height` (preserving aspect) and pads to `target_width`, exactly
-// like PaddleOCR's recognition pre-processing (`predict_rec`'s shared `max_wh_ratio`).
-cv::Mat RecResizeTo(const cv::Mat& img, int target_width, int rec_image_height) {
-  const float ratio = static_cast<float>(img.cols) / static_cast<float>(img.rows);
-  const int resize_w = std::min(target_width,
-                                static_cast<int>(std::ceil(rec_image_height * ratio)));
+// Resizes a crop to `rec_image_height` preserving the aspect ratio (PaddleOCR's recognition
+// pre-processing, and the benchmark's `rec_preprocess`). Width is `ceil(h_rec * w / h)` clamped to
+// `[1, kMaxRecWidth]` — no padding: ONNX Runtime accepts the dynamic width directly.
+cv::Mat RecResize(const cv::Mat& img, int rec_image_height) {
+  if (img.rows <= 0 || img.cols <= 0) return {};
+  const double ratio = static_cast<double>(img.cols) / static_cast<double>(img.rows);
+  int resize_w = static_cast<int>(std::ceil(static_cast<double>(rec_image_height) * ratio));
+  resize_w = std::clamp(resize_w, 1, kMaxRecWidth);
   cv::Mat out;
-  cv::resize(img, out, cv::Size(std::max(resize_w, 1), rec_image_height), 0.f, 0.f,
-             cv::INTER_LINEAR);
-  if (target_width > out.cols) {
-    cv::copyMakeBorder(out, out, 0, 0, 0, target_width - out.cols, cv::BORDER_CONSTANT,
-                       {127, 127, 127});
-  }
+  cv::resize(img, out, cv::Size(resize_w, rec_image_height), 0.f, 0.f, cv::INTER_LINEAR);
   return out;
 }
 
@@ -225,6 +240,10 @@ std::string DecodeCtc(const float* pred, int T, int C, const std::vector<std::st
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
+// Engine lifecycle
+// ---------------------------------------------------------------------------------------------
+
+namespace {
 
 std::vector<std::string> ReadDictionary(const std::string& path) {
   std::vector<std::string> dict;
@@ -237,47 +256,126 @@ std::vector<std::string> ReadDictionary(const std::string& path) {
   return dict;
 }
 
-Engine::Predictor Engine::LoadModel(const std::string& path) const {
-  MobileConfig config;
-  config.set_model_from_file(path);
-  config.set_threads(threads_);
-  config.set_power_mode(paddle::lite_api::LITE_POWER_HIGH);
-  return CreatePaddlePredictor<MobileConfig>(config);
+}  // namespace
+
+Engine::~Engine() { Release(); }
+
+void Engine::Release() {
+  if (api_ != nullptr) {
+    if (det_ != nullptr) api_->ReleaseSession(det_);
+    if (rec_ != nullptr) api_->ReleaseSession(rec_);
+  }
+  det_ = nullptr;
+  rec_ = nullptr;
+  dict_.clear();
 }
 
-void Engine::EnsureShape(bool is_detector, long height, long width) {
-  auto& predictor = is_detector ? det_ : rec_;
-  const long last_h = is_detector ? det_h_ : rec_h_;
-  const long last_w = is_detector ? det_w_ : rec_w_;
-  if (predictor != nullptr && last_h >= 0 && (height != last_h || width != last_w)) {
-    predictor = LoadModel(is_detector ? det_path_ : rec_path_);
+/// Creates one ORT session and records its (single) input and output names.
+namespace {
+
+bool CreateSession(const OrtApi* api, OrtEnv* env, const std::string& path, int threads,
+                   OrtSession** out_session, std::string* out_input, std::string* out_output,
+                   std::string* out_error) {
+  SessionOptionsGuard options_guard{api, nullptr};
+  OrtSessionOptions* options = nullptr;
+  auto fail = [&](OrtStatus* status) {
+    if (status == nullptr) return false;
+    *out_error = api->GetErrorMessage(status);
+    api->ReleaseStatus(status);
+    return true;
+  };
+
+  if (fail(api->CreateSessionOptions(&options))) return false;
+  options_guard.options = options;
+  if (fail(api->SetSessionGraphOptimizationLevel(options, ORT_ENABLE_ALL))) return false;
+  if (fail(api->SetIntraOpNumThreads(options, threads))) return false;
+  // ORT's own default log severity is WARNING; keep the app log quiet.
+  if (fail(api->SetSessionLogSeverityLevel(options, 3 /* ORT_LOGGING_LEVEL_ERROR */))) return false;
+
+  OrtSession* session = nullptr;
+  if (fail(api->CreateSession(env, path.c_str(), options, &session))) return false;
+
+  OrtAllocator* allocator = nullptr;
+  if (fail(api->GetAllocatorWithDefaultOptions(&allocator))) {
+    api->ReleaseSession(session);
+    return false;
   }
-  if (is_detector) {
-    det_h_ = height;
-    det_w_ = width;
-  } else {
-    rec_h_ = height;
-    rec_w_ = width;
+  const auto name_at = [&](size_t index, bool input, std::string* out) {
+    char* name = nullptr;
+    OrtStatus* status = input ? api->SessionGetInputName(session, index, allocator, &name)
+                              : api->SessionGetOutputName(session, index, allocator, &name);
+    if (fail(status)) return false;
+    *out = name != nullptr ? name : "";
+    if (name != nullptr && api->AllocatorFree(allocator, name) != nullptr) {
+      // AllocatorFree only fails for an allocator that cannot free; the default one never does.
+    }
+    return true;
+  };
+  if (!name_at(0, /*input=*/true, out_input) || !name_at(0, /*input=*/false, out_output)) {
+    api->ReleaseSession(session);
+    return false;
   }
+  *out_session = session;
+  return true;
+}
+
+}  // namespace
+
+bool Engine::CreateSessions() {
+  api_ = ort::Api();
+  if (api_ == nullptr) {
+    ort_error_ = ort::LoadError();
+    return false;
+  }
+
+  // The env owns the (intra-op) thread pools and is created once per process.
+  if (env_ == nullptr) {
+    if (api_->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "komikun_ocr", &env_) != nullptr) {
+      ort_error_ = "CreateEnv failed";
+      return false;
+    }
+  }
+  if (memory_ == nullptr) {
+    if (api_->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &memory_) != nullptr) {
+      ort_error_ = "CreateCpuMemoryInfo failed";
+      return false;
+    }
+  }
+  if (run_options_ == nullptr) {
+    if (api_->CreateRunOptions(&run_options_) != nullptr) {
+      ort_error_ = "CreateRunOptions failed";
+      return false;
+    }
+  }
+
+  std::string det_error;
+  if (!CreateSession(api_, env_, det_path_, threads_, &det_, &det_input_, &det_output_,
+                     &det_error)) {
+    ort_error_ = "det session: " + det_error;
+    Release();
+    return false;
+  }
+  std::string rec_error;
+  if (!CreateSession(api_, env_, rec_path_, threads_, &rec_, &rec_input_, &rec_output_,
+                     &rec_error)) {
+    ort_error_ = "rec session: " + rec_error;
+    Release();
+    return false;
+  }
+  return true;
 }
 
 bool Engine::Init(const std::string& det_model, const std::string& rec_model,
                   const std::string& dict_path, int num_threads) {
+  if (ready()) return true;
+
   threads_ = num_threads > 0 ? num_threads : 4;
   det_path_ = det_model;
   rec_path_ = rec_model;
-  det_h_ = det_w_ = rec_h_ = rec_w_ = -1;
-
-  det_ = LoadModel(det_model);
-  rec_ = LoadModel(rec_model);
-  if (det_ == nullptr || rec_ == nullptr) {
-    Release();
-    return false;
-  }
 
   const std::vector<std::string> raw = ReadDictionary(dict_path);
   if (raw.empty()) {
-    Release();
+    ort_error_ = "empty or missing dictionary: " + dict_path;
     return false;
   }
   dict_.clear();
@@ -285,15 +383,146 @@ bool Engine::Init(const std::string& det_model, const std::string& rec_model,
   dict_.emplace_back("#");  // CTC blank
   dict_.insert(dict_.end(), raw.begin(), raw.end());
   dict_.emplace_back(" ");  // trailing space class (PaddleOCR convention)
+
+  return CreateSessions();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Inference
+// ---------------------------------------------------------------------------------------------
+
+bool Engine::RunDetector(const cv::Mat& bgr, const Options& options, cv::Mat* pred_map,
+                         std::vector<float>* ratio_hw, double* prep_ms, double* det_ms) {
+  const auto t0 = Clock::now();
+  cv::Mat resized = DetResize(bgr, options.max_side_len, *ratio_hw);
+  cv::Mat det_fp;
+  resized.convertTo(det_fp, CV_32FC3, 1.0 / 255.f);
+
+  const int height = det_fp.rows;
+  const int width = det_fp.cols;
+  std::vector<float> input(static_cast<size_t>(3) * height * width);
+  MeanScale(reinterpret_cast<const float*>(det_fp.data), input.data(), height * width,
+            {0.485f, 0.456f, 0.406f}, {1 / 0.229f, 1 / 0.224f, 1 / 0.225f});
+  *prep_ms = Ms(t0, Clock::now());
+
+  const int64_t shape[4] = {1, 3, height, width};
+  OrtValue* value = nullptr;
+  if (api_->CreateTensorWithDataAsOrtValue(memory_, input.data(), input.size() * sizeof(float),
+                                           shape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                                           &value) != nullptr) {
+    ort_error_ = "det CreateTensorWithDataAsOrtValue failed";
+    return false;
+  }
+  ValueGuard value_guard{api_, value};
+
+  const auto t1 = Clock::now();
+  const char* input_names[1] = {det_input_.c_str()};
+  const char* output_names[1] = {det_output_.c_str()};
+  OrtValue* outputs[1] = {nullptr};
+  if (api_->Run(det_, run_options_, input_names, &value, 1, output_names, 1, outputs) != nullptr) {
+    ort_error_ = "det Run failed";
+    return false;
+  }
+  ValueGuard output_guard{api_, outputs[0]};
+  *det_ms = Ms(t1, Clock::now());
+
+  OrtTensorTypeAndShapeInfo* info = nullptr;
+  if (api_->GetTensorTypeAndShape(outputs[0], &info) != nullptr) {
+    ort_error_ = "det GetTensorTypeAndShape failed";
+    return false;
+  }
+  ShapeGuard info_guard{api_, info};
+  size_t dims_count = 0;
+  if (api_->GetDimensionsCount(info, &dims_count) != nullptr || dims_count < 4) {
+    ort_error_ = "det unexpected output rank";
+    return false;
+  }
+  std::vector<int64_t> dims(dims_count);
+  if (api_->GetDimensions(info, dims.data(), dims_count) != nullptr) {
+    ort_error_ = "det GetDimensions failed";
+    return false;
+  }
+  const int out_h = static_cast<int>(dims[2]);
+  const int out_w = static_cast<int>(dims[3]);
+
+  float* data = nullptr;
+  if (api_->GetTensorMutableData(outputs[0], reinterpret_cast<void**>(&data)) != nullptr ||
+      data == nullptr) {
+    ort_error_ = "det GetTensorMutableData failed";
+    return false;
+  }
+  *pred_map = cv::Mat(out_h, out_w, CV_32F);
+  std::memcpy(pred_map->ptr<float>(), data,
+              static_cast<size_t>(out_h) * out_w * sizeof(float));
   return true;
 }
 
-void Engine::Release() {
-  det_.reset();
-  rec_.reset();
-  dict_.clear();
-  det_h_ = det_w_ = rec_h_ = rec_w_ = -1;
+bool Engine::RecognizeCrop(const cv::Mat& crop, std::string* text, float* score) {
+  const cv::Mat resized = RecResize(crop, 48);
+  if (resized.empty()) return false;
+  cv::Mat rec_fp;
+  resized.convertTo(rec_fp, CV_32FC3, 1.0 / 255.f);
+
+  const int height = rec_fp.rows;
+  const int width = rec_fp.cols;
+  std::vector<float> input(static_cast<size_t>(3) * height * width);
+  MeanScale(reinterpret_cast<const float*>(rec_fp.data), input.data(), height * width,
+            {0.5f, 0.5f, 0.5f}, {2.0f, 2.0f, 2.0f});
+
+  const int64_t shape[4] = {1, 3, height, width};
+  OrtValue* value = nullptr;
+  if (api_->CreateTensorWithDataAsOrtValue(memory_, input.data(), input.size() * sizeof(float),
+                                           shape, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
+                                           &value) != nullptr) {
+    ort_error_ = "rec CreateTensorWithDataAsOrtValue failed";
+    return false;
+  }
+  ValueGuard value_guard{api_, value};
+
+  const char* input_names[1] = {rec_input_.c_str()};
+  const char* output_names[1] = {rec_output_.c_str()};
+  OrtValue* outputs[1] = {nullptr};
+  if (api_->Run(rec_, run_options_, input_names, &value, 1, output_names, 1, outputs) != nullptr) {
+    ort_error_ = "rec Run failed";
+    return false;
+  }
+  ValueGuard output_guard{api_, outputs[0]};
+
+  OrtTensorTypeAndShapeInfo* info = nullptr;
+  if (api_->GetTensorTypeAndShape(outputs[0], &info) != nullptr) {
+    ort_error_ = "rec GetTensorTypeAndShape failed";
+    return false;
+  }
+  ShapeGuard info_guard{api_, info};
+  size_t dims_count = 0;
+  if (api_->GetDimensionsCount(info, &dims_count) != nullptr || dims_count < 3) {
+    ort_error_ = "rec unexpected output rank";
+    return false;
+  }
+  std::vector<int64_t> dims(dims_count);
+  if (api_->GetDimensions(info, dims.data(), dims_count) != nullptr) {
+    ort_error_ = "rec GetDimensions failed";
+    return false;
+  }
+  const int steps = static_cast<int>(dims[1]);
+  const int classes = static_cast<int>(dims[2]);
+
+  float* data = nullptr;
+  if (api_->GetTensorMutableData(outputs[0], reinterpret_cast<void**>(&data)) != nullptr ||
+      data == nullptr) {
+    ort_error_ = "rec GetTensorMutableData failed";
+    return false;
+  }
+  *text = DecodeCtc(data, steps, classes, dict_, score);
+  return true;
 }
+
+#ifdef KOMIKUN_OCR_HOST_TEST
+bool Engine::RecognizeCropParity(const cv::Mat& bgr_crop, std::string* text, float* score) {
+  if (!ready() || bgr_crop.empty()) return false;
+  return RecognizeCrop(bgr_crop, text, score);
+}
+#endif
 
 std::vector<Line> Engine::Run(const cv::Mat& bgr, const Options& options, Timings* timings) {
   Timings local;
@@ -304,42 +533,23 @@ std::vector<Line> Engine::Run(const cv::Mat& bgr, const Options& options, Timing
   }
 
   // ---------------------------------------------------------------- detection
-  const auto t0 = Clock::now();
+  cv::Mat pred_map;
   std::vector<float> ratio_hw;
-  cv::Mat resized = DetResize(bgr, options.max_side_len, ratio_hw);
-  cv::Mat det_fp;
-  resized.convertTo(det_fp, CV_32FC3, 1.0 / 255.f);
-
-  EnsureShape(true, det_fp.rows, det_fp.cols);
-
-  {
-    std::unique_ptr<paddle::lite_api::Tensor> input_tensor(det_->GetInput(0));
-    input_tensor->Resize({1, 3, det_fp.rows, det_fp.cols});
-    float* data0 = input_tensor->mutable_data<float>();
-    MeanScale(reinterpret_cast<const float*>(det_fp.data), data0, det_fp.rows * det_fp.cols,
-              {0.485f, 0.456f, 0.406f}, {1 / 0.229f, 1 / 0.224f, 1 / 0.225f});
+  if (!RunDetector(bgr, options, &pred_map, &ratio_hw, &local.prep, &local.det)) {
+    if (timings) *timings = local;
+    return lines;
   }
-  const auto t1 = Clock::now();
-  local.prep += Ms(t0, t1);
-
-  det_->Run();
   const auto t2 = Clock::now();
-  local.det += Ms(t1, t2);
 
-  std::unique_ptr<const paddle::lite_api::Tensor> det_out(det_->GetOutput(0));
-  const float* outptr = det_out->data<float>();
-  const auto out_shape = det_out->shape();
-  const int out_h = static_cast<int>(out_shape[2]);
-  const int out_w = static_cast<int>(out_shape[3]);
-
-  cv::Mat pred_map(out_h, out_w, CV_32F);
-  cv::Mat bit_map(out_h, out_w, CV_8UC1);
-  float* pred_ptr = pred_map.ptr<float>();
-  uint8_t* bit_ptr = bit_map.ptr<uint8_t>();
-  for (int i = 0; i < out_h * out_w; ++i) {
-    const float v = outptr[i];
-    pred_ptr[i] = v;
-    bit_ptr[i] = static_cast<uint8_t>(std::min(255.f, std::max(0.f, v * 255.f)));
+  cv::Mat bit_map(pred_map.size(), CV_8UC1);
+  {
+    float* pred_ptr = pred_map.ptr<float>();
+    uint8_t* bit_ptr = bit_map.ptr<uint8_t>();
+    const int total = pred_map.rows * pred_map.cols;
+    for (int i = 0; i < total; ++i) {
+      bit_ptr[i] = static_cast<uint8_t>(
+          std::min(255.f, std::max(0.f, pred_ptr[i] * 255.f)));
+    }
   }
 
   cv::Mat binary;
@@ -360,9 +570,6 @@ std::vector<Line> Engine::Run(const cv::Mat& bgr, const Options& options, Timing
   // ---------------------------------------------------------------- recognition
   const std::vector<int> reading = ReadingOrder(filtered);
 
-  // Crop every box once, then run recognition with a single shared input width for the whole page
-  // (PaddleOCR's `predict_rec` `max_wh_ratio`). A stable shape keeps Paddle-Lite's mobile
-  // predictor correct across all boxes.
   struct Job {
     cv::Mat crop;
     int order;
@@ -370,45 +577,22 @@ std::vector<Line> Engine::Run(const cv::Mat& bgr, const Options& options, Timing
   };
   std::vector<Job> jobs;
   jobs.reserve(filtered.size());
-  int target_width = 0;
   for (size_t rank = 0; rank < reading.size(); ++rank) {
     const int box_index = reading[rank];
     const auto tc0 = Clock::now();
     cv::Mat crop = GetRotateCropImage(bgr, filtered[box_index]);
     local.crop += Ms(tc0, Clock::now());
     if (crop.empty()) continue;
-    const int natural = RecNaturalWidth(crop, options.rec_image_height);
-    if (natural <= 0) continue;
-    target_width = std::max(target_width, natural);
     jobs.push_back({std::move(crop), static_cast<int>(rank), filtered[box_index]});
-  }
-  if (!jobs.empty()) {
-    target_width = std::min(target_width, kMaxRecWidth);
-    EnsureShape(false, options.rec_image_height, target_width);
   }
 
   for (const Job& job : jobs) {
-    cv::Mat rec_resized = RecResizeTo(job.crop, target_width, options.rec_image_height);
-    cv::Mat rec_fp;
-    rec_resized.convertTo(rec_fp, CV_32FC3, 1.0 / 255.f);
-
     const auto tr0 = Clock::now();
-    std::unique_ptr<paddle::lite_api::Tensor> input_tensor(rec_->GetInput(0));
-    input_tensor->Resize({1, 3, rec_fp.rows, rec_fp.cols});
-    float* data0 = input_tensor->mutable_data<float>();
-    MeanScale(reinterpret_cast<const float*>(rec_fp.data), data0, rec_fp.rows * rec_fp.cols,
-              {0.5f, 0.5f, 0.5f}, {2.0f, 2.0f, 2.0f});
-    rec_->Run();
-
-    std::unique_ptr<const paddle::lite_api::Tensor> rec_out(rec_->GetOutput(0));
-    const float* predict_batch = rec_out->data<float>();
-    const auto shape = rec_out->shape();
-    const int T = static_cast<int>(shape[1]);
-    const int C = static_cast<int>(shape[2]);
-
     float score = 0.f;
-    std::string text = DecodeCtc(predict_batch, T, C, dict_, &score);
+    std::string text;
+    const bool ok = RecognizeCrop(job.crop, &text, &score);
     local.rec += Ms(tr0, Clock::now());
+    if (!ok) continue;
 
     Sanitize(&text);
     if (text.empty()) continue;

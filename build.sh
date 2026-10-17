@@ -2,19 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 komi-kun contributors
 #
-# Builds komi-kun's PaddleOCR native artifact:
-#   * libpaddle_ocr.so for every supported Android ABI (our JNI over Paddle-Lite)
+# Builds komi-kun's PaddleOCR native artifact on ONNX Runtime:
+#   * libpaddle_ocr.so for every supported Android ABI (our JNI shim over ONNX Runtime + OpenCV)
+#   * the ONNX Runtime runtime library, as published by Microsoft (checksum-pinned, unmodified)
+#   * the PP-OCRv6-small ONNX models + recognition dictionary
 #   * an optional offline host harness used to validate the pipeline without a device
-#   * the converted Paddle-Lite models + recognition dictionary
-#   * manifest.json (per-file SHA-256 / size / ABI / SPDX)
+#   * manifest.json (per-file SHA-256 / size / ABI / SPDX) + app-paddle-manifest.json
 #
 # Everything is pinned to upstream releases in deps.lock.json. Nothing here is vendored into the
-# app repo; the app only consumes the produced manifest.
+# app repo; the app only consumes the produced manifests.
 #
 # Usage:
-#   ./build.sh                 # Android libs for every ABI + models + manifest
-#   ./build.sh --host          # also build the host conformance harness and run it on test pages
+#   ./build.sh                 # Android libs for every ABI + models + manifests
+#   ./build.sh --host          # also build the host conformance harness
 #   ./build.sh --abi arm64-v8a # restrict to one ABI
+#   ./build.sh --manifest-only # only regenerate the manifests from an existing out/
 #   ./build.sh --clean
 set -euo pipefail
 
@@ -27,24 +29,26 @@ OUT="$ROOT/out"
 NDK_VERSION_DEFAULT="29.0.14206865"
 ANDROID_API=26
 
-LITE_TAG="v2.14-rc"
-LITE_BASE="https://github.com/PaddlePaddle/Paddle-Lite/releases/download/$LITE_TAG"
-OCV_TAG="v36"
-OCV_BASE="https://github.com/nihui/opencv-mobile/releases/download/$OCV_TAG"
-OCV_VERSION="4.13.0"
-# PP-OCRv5 mobile models (det + unified rec covering Japanese), as officially pre-converted to the
-# Paddle-Lite naive-buffer format by the PaddlePaddle team for `Paddle-Lite-Demo`'s
-# `feature/paddle-x` branch (the "PaddleX-Lite-Deploy" of PaddleOCR's on-device guide). PaddleOCR's
-# own PP-OCRv5 inference tars ship PaddlePaddle 3.x PIR (`inference.json`), which `opt` 2.14-rc
-# cannot parse, so we consume the official `.nb` bytes directly and pin their SHA-256 in
-# deps.lock.json. The `.nb` header records `v2.14-rc`, i.e. the exact opt/runtime we link.
-V5_NB_BASE="https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models"
-V5_LABELS_URL="https://paddlelite-demo.bj.bcebos.com/demo/ocr/labels/labels.tar.gz"
+ORT_VERSION="1.31.0"
+ORT_AAR_URL="https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/$ORT_VERSION/onnxruntime-android-$ORT_VERSION.aar"
+ORT_LINUX_URL="https://github.com/microsoft/onnxruntime/releases/download/v$ORT_VERSION/onnxruntime-linux-x64-$ORT_VERSION.tgz"
 
-# ABIs built from a Paddle-Lite prebuilt release. `x86_64` has no upstream prebuilt (Paddle-Lite
-# ships armv7/armv8 for Android only) and would additionally need x86-targeted models -- see
-# README.md.
-ALL_ABIS=(arm64-v8a armeabi-v7a)
+OCV_TAG="v36"
+OCV_VERSION="4.13.0"
+OCV_BASE="https://github.com/nihui/opencv-mobile/releases/download/$OCV_TAG"
+
+CLIPPER_HPP="https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.hpp"
+CLIPPER_CPP="https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.cpp"
+
+# PP-OCRv6 small: the smallest PP-OCRv6 recogniser that still covers Japanese kana (v6 *tiny*
+# has no kana and must not be used). Pinned to a HuggingFace revision in deps.lock.json.
+HF_BASE="https://huggingface.co"
+V6_DET_REPO="PaddlePaddle/PP-OCRv6_small_det_onnx"
+V6_REC_REPO="PaddlePaddle/PP-OCRv6_small_rec_onnx"
+
+# ABIs are the app's single ABI set (contract §1.5). ONNX Runtime publishes all three, and the
+# ONNX models are architecture-independent, so x86_64 is a first-class target here.
+ALL_ABIS=(arm64-v8a armeabi-v7a x86_64)
 
 BUILD_HOST=0
 CLEAN=0
@@ -62,6 +66,25 @@ while [[ $# -gt 0 ]]; do
 done
 [[ ${#ABIS[@]} -eq 0 ]] && ABIS=("${ALL_ABIS[@]}")
 
+# ---------------------------------------------------------------------------------------------
+# pinned-input helpers (deps.lock.json is the single source of truth)
+# ---------------------------------------------------------------------------------------------
+json_get() { # <dot.path> -> value (null -> empty)
+  python3 - "$ROOT/deps.lock.json" "$1" <<'PY'
+import json, sys
+node = json.load(open(sys.argv[1]))
+for part in sys.argv[2].split("."):
+    node = node.get(part) if isinstance(node, dict) else None
+    if node is None:
+        break
+print("" if node is None else node)
+PY
+}
+
+# deps.lock.json is parsed, so it must be valid JSON (no `//` comments - use `_comment`).
+python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$ROOT/deps.lock.json" \
+  || { echo "[FAIL] deps.lock.json is not valid JSON" >&2; exit 1; }
+
 if [[ $CLEAN -eq 1 ]]; then rm -rf "$WORK" "$OUT"; fi
 mkdir -p "$DL" "$DEPS" "$WORK" "$OUT/lib" "$OUT/models"
 
@@ -78,94 +101,125 @@ find_ndk() {
   echo ""
 }
 
-# ---------------------------------------------------------------------------------------------
-# downloads (pinned)
-# ---------------------------------------------------------------------------------------------
-fetch() { # url outfile
-  local url="$1" out="$2"
-  if [[ -s "$out" ]]; then echo "[skip] $(basename "$out")"; return; fi
+sha256() { sha256sum "$1" | cut -d' ' -f1; }
+size_of() { stat -c '%s' "$1"; }
+
+fetch_pinned() { # url outfile expected_sha256
+  local url="$1" out="$2" expected="$3"
+  if [[ -z "$expected" ]]; then
+    echo "[FAIL] no pinned sha256 for $(basename "$out") (deps.lock.json lookup failed)" >&2
+    exit 1
+  fi
+  if [[ -s "$out" ]] && [[ "$(sha256 "$out")" == "$expected" ]]; then
+    echo "[skip] $(basename "$out")"
+    return
+  fi
   echo "[get ] $url"
   curl -fSL --retry 3 -o "$out.part" "$url"
+  local actual; actual="$(sha256 "$out.part")"
+  if [[ "$actual" != "$expected" ]]; then
+    rm -f "$out.part"
+    echo "[FAIL] sha256 mismatch for $(basename "$out"): got $actual want $expected" >&2
+    exit 1
+  fi
   mv "$out.part" "$out"
 }
 
+# ---------------------------------------------------------------------------------------------
+# downloads (pinned)
+# ---------------------------------------------------------------------------------------------
 download_deps() {
-  for abi in "${ABIS[@]}"; do
-    case "$abi" in
-      arm64-v8a) fetch "$LITE_BASE/inference_lite_lib.android.armv8.clang.c++_shared.with_extra.tar.gz" "$DL/lite.android.armv8.tar.gz" ;;
-      armeabi-v7a) fetch "$LITE_BASE/inference_lite_lib.android.armv7.clang.c++_shared.with_extra.tar.gz" "$DL/lite.android.armv7.tar.gz" ;;
-      *) echo "no Paddle-Lite prebuilt for $abi" >&2; exit 1 ;;
-    esac
-  done
-  fetch "$OCV_BASE/opencv-mobile-$OCV_VERSION-android.zip" "$DL/opencv-mobile-android.zip"
-  fetch "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.hpp" "$DL/clipper.hpp"
-  fetch "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.cpp" "$DL/clipper.cpp"
-  fetch "$V5_NB_BASE/PP-OCRv5_mobile_det.tar.gz" "$DL/ppocrv5_mobile_det.tar.gz"
-  fetch "$V5_NB_BASE/PP-OCRv5_mobile_rec.tar.gz" "$DL/ppocrv5_mobile_rec.tar.gz"
-  fetch "$V5_LABELS_URL" "$DL/labels.tar.gz"
-
+  fetch_pinned "$ORT_AAR_URL" "$DL/onnxruntime-android-$ORT_VERSION.aar" \
+    "$(json_get onnxruntime.android_aar.sha256)"
+  fetch_pinned "$ORT_LINUX_URL" "$DL/onnxruntime-linux-x64-$ORT_VERSION.tgz" \
+    "$(json_get onnxruntime.linux_x86_64.sha256)"
+  fetch_pinned "$OCV_BASE/opencv-mobile-$OCV_VERSION-android.zip" "$DL/opencv-mobile-android.zip" \
+    "$(json_get opencv_mobile.android.sha256)"
+  fetch_pinned "$CLIPPER_HPP" "$DL/clipper.hpp" "$(json_get clipper.sha256_hpp)"
+  fetch_pinned "$CLIPPER_CPP" "$DL/clipper.cpp" "$(json_get clipper.sha256_cpp)"
   if [[ $BUILD_HOST -eq 1 ]]; then
-    fetch "$LITE_BASE/inference_lite_lib.x86.linux.tar.gz" "$DL/lite.x86.linux.tar.gz"
-    fetch "$OCV_BASE/opencv-mobile-$OCV_VERSION-ubuntu-2404.zip" "$DL/opencv-mobile-ubuntu.zip"
+    fetch_pinned "$OCV_BASE/opencv-mobile-$OCV_VERSION-ubuntu-2404.zip" "$DL/opencv-mobile-ubuntu.zip" \
+      "$(json_get opencv_mobile.linux_x86_64.sha256)"
   fi
+}
 
-  extract() { # tar/zip src dest
-    local src="$1" dest="$2"
-    if [[ -d "$dest" && -n "$(ls -A "$dest" 2>/dev/null)" ]]; then return; fi
-    mkdir -p "$dest"
-    case "$src" in
-      *.tar.gz) tar -xf "$src" -C "$dest" ;;
-      *.zip) unzip -q -o "$src" -d "$dest" ;;
-    esac
-  }
+extract_deps() {
+  mkdir -p "$DEPS"
+  if [[ ! -d "$DEPS/ort-aar" ]]; then
+    mkdir -p "$DEPS/ort-aar"
+    unzip -q -o "$DL/onnxruntime-android-$ORT_VERSION.aar" -d "$DEPS/ort-aar"
+  fi
+  # The per-ABI runtime bytes are pinned individually (see deps.lock.json); the AAR itself is
+  # verified at download time, this re-verifies what is actually staged/published.
   for abi in "${ABIS[@]}"; do
-    case "$abi" in
-      arm64-v8a) extract "$DL/lite.android.armv8.tar.gz" "$DEPS/lite.android.armv8" ;;
-      armeabi-v7a) extract "$DL/lite.android.armv7.tar.gz" "$DEPS/lite.android.armv7" ;;
-    esac
+    local src="$DEPS/ort-aar/jni/$abi/libonnxruntime.so"
+    local expected; expected="$(json_get "onnxruntime.android.$abi.sha256")"
+    if [[ ! -f "$src" ]]; then
+      echo "[FAIL] $src missing from the ORT AAR" >&2
+      exit 1
+    fi
+    if [[ "$(sha256 "$src")" != "$expected" ]]; then
+      echo "[FAIL] sha256 mismatch for $abi/libonnxruntime.so" >&2
+      exit 1
+    fi
+    echo "[ok  ] $abi/libonnxruntime.so $expected"
   done
-  extract "$DL/opencv-mobile-android.zip" "$DEPS/ocv-android"
+  if [[ $BUILD_HOST -eq 1 && ! -d "$DEPS/ort-linux" ]]; then
+    mkdir -p "$DEPS/ort-linux"
+    tar -xzf "$DL/onnxruntime-linux-x64-$ORT_VERSION.tgz" -C "$DEPS/ort-linux" --strip-components=1
+  fi
+  if [[ ! -d "$DEPS/ocv-android" ]]; then
+    mkdir -p "$DEPS/ocv-android"
+    unzip -q -o "$DL/opencv-mobile-android.zip" -d "$DEPS/ocv-android"
+  fi
+  if [[ $BUILD_HOST -eq 1 && ! -d "$DEPS/ocv-ubuntu" ]]; then
+    mkdir -p "$DEPS/ocv-ubuntu"
+    unzip -q -o "$DL/opencv-mobile-ubuntu.zip" -d "$DEPS/ocv-ubuntu"
+  fi
   mkdir -p "$ROOT/third_party/clipper"
   cp -f "$DL/clipper.hpp" "$DL/clipper.cpp" "$ROOT/third_party/clipper/"
-  if [[ $BUILD_HOST -eq 1 ]]; then
-    extract "$DL/lite.x86.linux.tar.gz" "$DEPS/lite.x86.linux"
-    extract "$DL/opencv-mobile-ubuntu.zip" "$DEPS/ocv-ubuntu"
-  fi
 }
 
 # ---------------------------------------------------------------------------------------------
 # models
 # ---------------------------------------------------------------------------------------------
 stage_models() {
-  local tmp="$WORK/models-native"
-  mkdir -p "$tmp"
-  [[ -f "$tmp/PP-OCRv5_mobile_det.nb" ]] || tar -xf "$DL/ppocrv5_mobile_det.tar.gz" -C "$tmp"
-  [[ -f "$tmp/PP-OCRv5_mobile_rec.nb" ]] || tar -xf "$DL/ppocrv5_mobile_rec.tar.gz" -C "$tmp"
-  [[ -f "$tmp/ppocr_keys_ocrv5.txt" ]] || tar -xf "$DL/labels.tar.gz" -C "$tmp" ppocr_keys_ocrv5.txt
+  local det_rev rec_rev det_sha rec_sha
+  det_rev="$(json_get models.det.revision)"
+  rec_rev="$(json_get models.rec.revision)"
+  det_sha="$(json_get models.det.sha256)"
+  rec_sha="$(json_get models.rec.sha256)"
+  fetch_pinned "$HF_BASE/$V6_DET_REPO/resolve/$det_rev/inference.onnx" \
+    "$DL/ppocrv6_small_det.onnx" "$det_sha"
+  fetch_pinned "$HF_BASE/$V6_REC_REPO/resolve/$rec_rev/inference.onnx" \
+    "$DL/ppocrv6_small_rec.onnx" "$rec_sha"
+  fetch_pinned "$HF_BASE/$V6_REC_REPO/resolve/$rec_rev/inference.yml" "$DL/v6_small_rec_inference.yml" \
+    "$(json_get models.rec.yaml_sha256)"
+  fetch_pinned "$HF_BASE/$V6_DET_REPO/resolve/$det_rev/inference.yml" "$DL/v6_small_det_inference.yml" \
+    "$(json_get models.det.yaml_sha256)"
 
-  # Published under komi-kun's own flat names; byte-identical to the official PaddlePaddle `.nb`
-  # (sha256 pinned in deps.lock.json and re-verified against the release manifest at runtime).
-  cp -f "$tmp/PP-OCRv5_mobile_det.nb" "$OUT/models/ppocrv5_det.nb"
-  cp -f "$tmp/PP-OCRv5_mobile_rec.nb" "$OUT/models/ppocrv5_rec.nb"
-  cp -f "$tmp/ppocr_keys_ocrv5.txt" "$OUT/models/ppocrv5_dict.txt"
+  cp -f "$DL/ppocrv6_small_det.onnx" "$OUT/models/ppocrv6_small_det.onnx"
+  cp -f "$DL/ppocrv6_small_rec.onnx" "$OUT/models/ppocrv6_small_rec.onnx"
+  python3 "$ROOT/tools/extract_dict.py" "$DL/v6_small_rec_inference.yml" \
+    "$OUT/models/ppocrv6_small_dict.txt"
+
+  local dict_sha; dict_sha="$(json_get models.dict.sha256)"
+  local actual; actual="$(sha256 "$OUT/models/ppocrv6_small_dict.txt")"
+  if [[ "$actual" != "$dict_sha" ]]; then
+    echo "[FAIL] extracted dict sha256 mismatch: got $actual want $dict_sha" >&2
+    exit 1
+  fi
+  echo "[dict] ppocrv6_small_dict.txt $actual"
 }
 
 # ---------------------------------------------------------------------------------------------
 # android libraries
 # ---------------------------------------------------------------------------------------------
-lite_dir_for() {
-  case "$1" in
-    arm64-v8a) echo "$DEPS/lite.android.armv8/inference_lite_lib.android.armv8.clang.c++_shared.with_extra/cxx" ;;
-    armeabi-v7a) echo "$DEPS/lite.android.armv7/inference_lite_lib.android.armv7.clang.c++_shared.with_extra/cxx" ;;
-  esac
-}
-
 build_android() {
   local ndk="$1"
   local tc="$ndk/build/cmake/android.toolchain.cmake"
   local ocv="$DEPS/ocv-android/opencv-mobile-$OCV_VERSION-android/sdk/native"
   for abi in "${ABIS[@]}"; do
-    local lite; lite="$(lite_dir_for "$abi")"
     local extra=""
     [[ -f "$ocv/3rdparty/libs/$abi/libkleidicv.a" ]] && extra="$ocv/3rdparty/libs/$abi/libkleidicv.a;$ocv/3rdparty/libs/$abi/libkleidicv_hal.a;$ocv/3rdparty/libs/$abi/libkleidicv_thread.a"
     echo "[build] libpaddle_ocr.so ($abi)"
@@ -175,8 +229,7 @@ build_android() {
       -DANDROID_PLATFORM="android-$ANDROID_API" \
       -DANDROID_STL=c++_shared \
       -DCMAKE_BUILD_TYPE=Release \
-      -DKOMIKUN_LITE_INCLUDE="$lite/include" \
-      -DKOMIKUN_LITE_LIB="$lite/lib/libpaddle_api_light_bundled.a" \
+      -DKOMIKUN_ORT_INCLUDE="$DEPS/ort-aar/headers" \
       -DKOMIKUN_OPENCV_INCLUDE="$ocv/jni/include" \
       -DKOMIKUN_OPENCV_LIB_DIR="$ocv/staticlibs/$abi" \
       -DKOMIKUN_OPENCV_EXTRA_LIBS="$extra" \
@@ -185,6 +238,8 @@ build_android() {
     mkdir -p "$OUT/lib/$abi"
     cp -f "$WORK/android-$abi/libpaddle_ocr.so" "$OUT/lib/$abi/libpaddle_ocr.so"
     "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "$OUT/lib/$abi/libpaddle_ocr.so" 2>/dev/null || true
+    # The ORT runtime is republished byte-for-byte, exactly as Microsoft built it.
+    cp -f "$DEPS/ort-aar/jni/$abi/libonnxruntime.so" "$OUT/lib/$abi/libonnxruntime.so"
   done
 }
 
@@ -192,88 +247,87 @@ build_android() {
 # host harness (validation only; never shipped)
 # ---------------------------------------------------------------------------------------------
 build_host() {
-  local lite="$DEPS/lite.x86.linux/inference_lite_lib/cxx"
-  local mklml="$DEPS/lite.x86.linux/inference_lite_lib/third_party/mklml/lib"
+  local ort="$DEPS/ort-linux"
   local ocv="$DEPS/ocv-ubuntu/opencv-mobile-$OCV_VERSION-ubuntu-2404"
   echo "[build] paddle_ocr_host (validation harness)"
   cmake -S "$ROOT" -B "$WORK/host" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DKOMIKUN_LITE_INCLUDE="$lite/include" \
-    -DKOMIKUN_LITE_LIB="$lite/lib/libpaddle_api_light_bundled.a" \
+    -DKOMIKUN_ORT_INCLUDE="$ort/include" \
+    -DKOMIKUN_ORT_LIB_DIR="$ort/lib" \
     -DKOMIKUN_OPENCV_INCLUDE="$ocv/include/opencv4" \
     -DKOMIKUN_OPENCV_LIB_DIR="$ocv/lib" \
-    -DKOMIKUN_HOST_OPENMP_LIB_DIR="$mklml" \
     >/dev/null
   cmake --build "$WORK/host" -j"$(nproc)" >/dev/null
   cp -f "$WORK/host/paddle_ocr_host" "$OUT/paddle_ocr_host"
-  echo "[host ] run: LD_LIBRARY_PATH=$mklml $OUT/paddle_ocr_host <det.nb> <rec.nb> <dict> <page.ppm>"
+  echo "[host ] run: $OUT/paddle_ocr_host info $OUT/models/ppocrv6_small_det.onnx $OUT/models/ppocrv6_small_rec.onnx $OUT/models/ppocrv6_small_dict.txt"
 }
 
 # ---------------------------------------------------------------------------------------------
-# NDK runtime libraries (libomp.so + libc++_shared.so)
+# NDK runtime library (libc++_shared.so — the only runtime dep of our shim)
 # ---------------------------------------------------------------------------------------------
 stage_runtime_libs() {
   local ndk="$1"
   local tcdir="$ndk/toolchains/llvm/prebuilt/linux-x86_64"
-  local clang_ver; clang_ver="$(ls "$tcdir/lib/clang" | sort -V | tail -1)"
   for abi in "${ABIS[@]}"; do
-    local triple clang_arch
+    local triple
     case "$abi" in
-      arm64-v8a) triple="aarch64-linux-android"; clang_arch="aarch64" ;;
-      armeabi-v7a) triple="arm-linux-androideabi"; clang_arch="arm" ;;
+      arm64-v8a) triple="aarch64-linux-android" ;;
+      armeabi-v7a) triple="arm-linux-androideabi" ;;
+      x86_64) triple="x86_64-linux-android" ;;
     esac
     mkdir -p "$OUT/lib/$abi"
     cp -f "$tcdir/sysroot/usr/lib/$triple/libc++_shared.so" "$OUT/lib/$abi/libc++_shared.so"
-    cp -f "$tcdir/lib/clang/$clang_ver/lib/linux/$clang_arch/libomp.so" "$OUT/lib/$abi/libomp.so"
   done
 }
 
 # ---------------------------------------------------------------------------------------------
 # manifest
 # ---------------------------------------------------------------------------------------------
-sha256() { sha256sum "$1" | cut -d' ' -f1; }
-size_of() { stat -c '%s' "$1"; }
+# SPDX ids: our shim is Apache-2.0; the ORT runtime is MIT; OpenCV/opencv-mobile and the PP-OCRv6
+# models are Apache-2.0; the NDK libc++ is Apache-2.0 WITH LLVM-exception.
+spdx_for() {
+  case "$1" in
+    libc++_shared.so) echo "Apache-2.0 WITH LLVM-exception" ;;
+    libonnxruntime.so) echo "MIT" ;;
+    *) echo "Apache-2.0" ;;
+  esac
+}
 
-# SPDX ids: our shim and the PaddleOCR/Paddle-Lite inputs are Apache-2.0; the NDK runtime
-# libraries are Apache-2.0 WITH LLVM-exception (libc++, the LLVM OpenMP runtime).
-spdx_for() { case "$1" in libc++_shared.so|libomp.so) echo "Apache-2.0 WITH LLVM-exception" ;; *) echo "Apache-2.0" ;; esac; }
-
-MODELS=(ppocrv5_det.nb ppocrv5_rec.nb ppocrv5_dict.txt)
+MODELS=(ppocrv6_small_det.onnx ppocrv6_small_rec.onnx ppocrv6_small_dict.txt)
+NATIVE_LIBS=(libpaddle_ocr.so libonnxruntime.so libc++_shared.so)
+RELEASE="ocr-models-v3"
+BASE_URL="https://github.com/komi-kun/komi-kun-ocr-models/releases/download/$RELEASE"
 
 json_entries() { # [$1=1 to omit libc++_shared.so]
   local omit_libcxx="${1:-0}"
-  local first=1 abi
-  for abi in "${ABIS[@]}"; do
-    for so in libpaddle_ocr.so libomp.so libc++_shared.so; do
+  local first=1 abi so m f
+  for abi in "${ALL_ABIS[@]}"; do
+    for so in "${NATIVE_LIBS[@]}"; do
       [[ "$so" == "libc++_shared.so" && "$omit_libcxx" == "1" ]] && continue
-      local f="$OUT/lib/$abi/$so"
+      f="$OUT/lib/$abi/$so"
       [[ -f "$f" ]] || continue
       [[ $first -eq 0 ]] && echo ","
       first=0
-      # Release assets are a flat namespace (GitHub rewrites '/' to '.'), so `path` is the asset
-      # name; the build-time fetch task builds the URL from it.
       printf '    { "abi": "%s", "name": "%s", "path": "%s_%s", "sha256": "%s", "size": %s, "spdx": "%s" }' \
         "$abi" "$so" "$abi" "$so" "$(sha256 "$f")" "$(size_of "$f")" "$(spdx_for "$so")"
     done
   done
   for m in "${MODELS[@]}"; do
-    local f="$OUT/models/$m"
+    f="$OUT/models/$m"
     [[ -f "$f" ]] || continue
     [[ $first -eq 0 ]] && echo ","
     first=0
-    printf '    { "name": "%s", "path": "%s", "sha256": "%s", "size": %s, "spdx": "Apache-2.0" }' \
-      "$m" "$m" "$(sha256 "$f")" "$(size_of "$f")"
+    printf '    { "name": "%s", "path": "%s", "sha256": "%s", "size": %s, "spdx": "%s" }' \
+      "$m" "$m" "$(sha256 "$f")" "$(size_of "$f")" "$(spdx_for "$m")"
   done
 }
-
-BASE_URL="https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v2"
 
 # The release manifest is what `ModelDownloader` fetches at runtime; the app manifest is the copy
 # that lives at `core/ocr/paddle-manifest.json` and drives the build-time fetch task.
 write_manifests() {
   {
     echo "{"
-    echo "  \"release\": \"ocr-models-v2\","
+    echo "  \"release\": \"$RELEASE\","
     echo "  \"baseUrl\": \"$BASE_URL\","
     echo "  \"files\": ["
     json_entries
@@ -292,17 +346,17 @@ write_manifests() {
     echo "    \"jniLibs fails the app merge with a duplicate-path error. Re-add the release's\","
     echo "    \"libc++_shared.so entries only if no other module provides it.\""
     echo "  ],"
-    echo "  \"release\": \"ocr-models-v2\","
+    echo "  \"release\": \"$RELEASE\","
     echo "  \"baseUrl\": \"$BASE_URL\","
-    echo "  \"abi\": [$(printf '"%s", ' "${ABIS[@]}" | sed 's/, $//')],"
+    echo "  \"abi\": [$(printf '"%s", ' "${ALL_ABIS[@]}" | sed 's/, $//')],"
     echo "  \"files\": ["
     json_entries 1
     echo
     echo "  ],"
     echo "  \"models\": {"
-    echo "    \"det\": [\"ppocrv5_det.nb\"],"
-    echo "    \"rec\": [\"ppocrv5_rec.nb\"],"
-    echo "    \"dict\": [\"ppocrv5_dict.txt\"]"
+    echo "    \"det\": [\"ppocrv6_small_det.onnx\"],"
+    echo "    \"rec\": [\"ppocrv6_small_rec.onnx\"],"
+    echo "    \"dict\": [\"ppocrv6_small_dict.txt\"]"
     echo "  }"
     echo "}"
   } > "$OUT/app-paddle-manifest.json"
@@ -317,6 +371,7 @@ main() {
   local ndk=""
   if [[ ${#ABIS[@]} -gt 0 ]]; then ndk="$(find_ndk)"; fi
   download_deps
+  extract_deps
   stage_models
   if [[ -n "$ndk" ]]; then
     build_android "$ndk"
@@ -329,12 +384,6 @@ main() {
   echo
   echo "Artifacts in $OUT:"
   find "$OUT" -type f | sort
-  if [[ $BUILD_HOST -eq 1 ]]; then
-    echo
-    echo "[info] host harness built at $OUT/paddle_ocr_host (toolchain check only)."
-    echo "[info] PP-OCRv5 ships only as arm-targeted .nb, so the offline conformance run"
-    echo "[info] (which needs x86-targeted models) is skipped for this release; see README."
-  fi
 }
 
 main

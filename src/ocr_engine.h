@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 komi-kun contributors
 //
-// PaddleOCR (Paddle-Lite) text detection + recognition engine for komi-kun.
+// PaddleOCR (ONNX Runtime) text detection + recognition engine for komi-kun.
 //
-// This is the portable, JNI-free core: it loads a DB text-detection model and a CRNN
-// text-recognition model converted to Paddle-Lite naive-buffer format (`opt` output) and runs the
-// standard PaddleOCR mobile pipeline over an in-memory image. The detection post-processing
-// (`BoxesFromBitmap`/`FilterTagDetRes`/`Unclip`) and the recognition crop/resize come from
-// PaddleOCR's Apache-2.0 `deploy/lite` reference implementation, vendored under
-// `third_party/paddleocr_lite/`. The engine itself (model loading, orchestration, portability
-// fixes, shape handling, protocol output) is ours.
+// This is the portable, JNI-free core: it loads a DB text-detection ONNX graph and a CRNN
+// text-recognition ONNX graph and runs the standard PaddleOCR mobile pipeline over an in-memory
+// image. Inference goes through ONNX Runtime's ABI-stable C API, loaded dynamically (see
+// `ort_runtime.h`); the graphs are ONNX exports of the official PaddlePaddle PP-OCR models, so they
+// are architecture-independent and the same files run on every ABI.
+//
+// The detection post-processing (`BoxesFromBitmap`/`FilterTagDetRes`/`Unclip`) and the recognition
+// crop/resize come from PaddleOCR's Apache-2.0 `deploy/lite` reference implementation, vendored
+// under `third_party/paddleocr_lite/`. The engine itself (model loading, orchestration,
+// preprocessing parity, protocol output) is ours.
+//
+// Preprocessing is deliberately byte-for-byte the same as the validated benchmark
+// (`/tmp/opencode/ocr-bench/common.py`), against which PP-OCRv6-small was selected:
+//   * detection: longest side <= 960, both sides rounded to a multiple of 32 (`round`, not truncate),
+//     BGR, `/255` then `(x - mean) / std` with mean `[0.485, 0.456, 0.406]`, std `[0.229, 0.224,
+//     0.225]`,
+//   * recognition: fixed `rec_image_height = 48`, width `ceil(48 * w / h)` capped at 3200, BGR,
+//     `(x / 255 - 0.5) / 0.5`,
+//   * greedy CTC decode with dict index 0 = blank and a trailing space class.
 #pragma once
 
 #include <array>
@@ -19,7 +31,11 @@
 
 #include <opencv2/core.hpp>
 
-#include "paddle_api.h"
+struct OrtApi;
+struct OrtEnv;
+struct OrtMemoryInfo;
+struct OrtRunOptions;
+struct OrtSession;
 
 namespace komikun::ocr {
 
@@ -58,10 +74,11 @@ struct Timings {
 class Engine {
  public:
   Engine() = default;
+  ~Engine();
   Engine(const Engine&) = delete;
   Engine& operator=(const Engine&) = delete;
 
-  /// Loads the detection + recognition models and the recognition dictionary.
+  /// Loads the detection + recognition ONNX models and the recognition dictionary.
   bool Init(const std::string& det_model,
             const std::string& rec_model,
             const std::string& dict_path,
@@ -74,28 +91,44 @@ class Engine {
   /// Runs full-page OCR. @p bgr is a CV_8UC3 image in BGR order (as `cv::imread` produces).
   std::vector<Line> Run(const cv::Mat& bgr, const Options& options, Timings* timings);
 
+#ifdef KOMIKUN_OCR_HOST_TEST
+  /// Host-only parity hook (never compiled into the shipped `.so`): runs recognition on a single
+  /// crop through the exact same preprocessing/decode path as [Run]. Used by the off-device
+  /// conformance harness to compare against the recorded benchmark outputs crop-by-crop.
+  bool RecognizeCropParity(const cv::Mat& bgr_crop, std::string* text, float* score);
+#endif
+
  private:
-  using Predictor = std::shared_ptr<paddle::lite_api::PaddlePredictor>;
+  /// Creates the ORT env / memory info / both sessions. Returns false with `ort_error()` set.
+  bool CreateSessions();
 
-  Predictor LoadModel(const std::string& path) const;
+  /// Runs the detector on @p bgr; writes the probability map to @p pred_map and the resize ratios
+  /// to @p ratio_hw (h then w). Records the pre-processing and inference times in @p prep_ms /
+  /// @p det_ms. Returns false on failure.
+  bool RunDetector(const cv::Mat& bgr, const Options& options, cv::Mat* pred_map,
+                   std::vector<float>* ratio_hw, double* prep_ms, double* det_ms);
 
-  /// Paddle-Lite's mobile predictor returns wrong results (and can crash) when a `Run()` uses a
-  /// different input shape than the previous one. Loading a model is only ~5 ms, so the predictor
-  /// is rebuilt whenever the next inference needs a different shape. `Run()` also derives a single
-  /// recognition width for the whole page (PaddleOCR's `predict_rec` `max_wh_ratio`) so the
-  /// recognition shape is stable across all boxes of a page.
-  void EnsureShape(bool is_detector, long height, long width);
+  /// Runs recognition on one already-oriented crop (landscape, as `GetRotateCropImage` returns).
+  bool RecognizeCrop(const cv::Mat& crop, std::string* text, float* score);
 
-  std::shared_ptr<paddle::lite_api::PaddlePredictor> det_;
-  std::shared_ptr<paddle::lite_api::PaddlePredictor> rec_;
+  /// ORT objects. `env_`, `memory_`, `run_options_` are created lazily and kept for the process
+  /// lifetime (re-creating them per `Init()` would only churn thread pools); the sessions are
+  /// created by [Init] and dropped by [Release].
+  const OrtApi* api_ = nullptr;
+  OrtEnv* env_ = nullptr;
+  OrtMemoryInfo* memory_ = nullptr;
+  OrtRunOptions* run_options_ = nullptr;
+  OrtSession* det_ = nullptr;
+  OrtSession* rec_ = nullptr;
   std::string det_path_;
   std::string rec_path_;
+  std::string det_input_;
+  std::string rec_input_;
+  std::string det_output_;
+  std::string rec_output_;
+  std::string ort_error_;
   std::vector<std::string> dict_;  // index 0 == CTC blank, last == space
   int threads_ = 4;
-  long det_h_ = 0;
-  long det_w_ = 0;
-  long rec_h_ = 0;
-  long rec_w_ = 0;
 };
 
 /// Serialises the engine result into the `TIMING|`/`LINE|` text protocol consumed by the Kotlin

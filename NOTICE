@@ -1,29 +1,31 @@
 komi-kun-ocr-models
 Copyright (c) 2026 komi-kun contributors
 
-This repository builds and publishes `libpaddle_ocr.so` and the converted PaddleOCR models used by
-komi-kun's `:core:ocr` module. It is distributed under the Apache License, Version 2.0 (see
-`LICENSE`), with the third-party components listed below.
+This repository builds and publishes `libpaddle_ocr.so`, the ONNX Runtime shared library and the
+PP-OCRv6 model files used by komi-kun's `:core:ocr` module. It is distributed under the Apache
+License, Version 2.0 (see `LICENSE`), with the third-party components listed below.
 
 ---------------------------------------------------------------------------------------------
 Components
 
-* komi-kun-ocr-models (this repository: `src/`, `build.sh`, `CMakeLists.txt`, `tests/`)
+* komi-kun-ocr-models (this repository: `src/`, `tools/`, `build.sh`, `CMakeLists.txt`, `tests/`)
   Apache-2.0 — Copyright (c) 2026 komi-kun contributors
 
-* Paddle-Lite (prebuilt Android/x86_64 inference libraries and the `opt` converter, v2.14-rc)
-  Apache-2.0 — Copyright (c) PaddlePaddle Authors
-  https://github.com/PaddlePaddle/Paddle-Lite
+* ONNX Runtime 1.31.0 (republished `libonnxruntime.so` for every published ABI, byte-for-byte from
+  the official `onnxruntime-android` AAR / `onnxruntime-linux-x64` release)
+  MIT — Copyright (c) Microsoft Corporation
+  https://github.com/microsoft/onnxruntime
 
-* PaddleOCR (deploy/lite post-processing sources and the conversion scripts/fixtures, v2.7.0)
+* PaddleOCR (deploy/lite post-processing sources and the model export/dictionary fixtures)
   Apache-2.0 — Copyright (c) PaddlePaddle Authors
   https://github.com/PaddlePaddle/PaddleOCR
 
-* PaddleOCR inference models (converted to Paddle-Lite naive-buffer `.nb` form)
-  - ch_PP-OCRv4_det_infer (text detection)
-  - japan_PP-OCRv4_rec_infer (Japanese text recognition)
-  - japan_dict.txt (recognition dictionary)
+* PP-OCRv6 small inference models (official ONNX exports)
+  - PP-OCRv6_small_det_onnx (text detection)
+  - PP-OCRv6_small_rec_onnx (text recognition) + its character dictionary
   Apache-2.0 — Copyright (c) PaddlePaddle Authors
+  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx
+  https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx
 
 * opencv-mobile 4.13.0 (statically linked into `libpaddle_ocr.so`)
   Apache-2.0 (OpenCV itself is Apache-2.0) — Copyright (c) nihui and the OpenCV authors
@@ -43,10 +45,11 @@ Components
 ---------------------------------------------------------------------------------------------
 Notes
 
-`libpaddle_ocr.so` is a combined work that statically links Paddle-Lite (mobile/light API bundle),
-opencv-mobile and Clipper, and dynamically links the NDK's `libomp.so` and `libc++_shared.so`.
-Paddle-Lite and OpenCV symbols are hidden (`-Wl,--exclude-libs,ALL`); only the three JNI entry
-points are exported.
+`libpaddle_ocr.so` is a combined work that statically links opencv-mobile and Clipper, dynamically
+links the NDK's `libomp.so` and `libc++_shared.so`, and **dynamically loads** ONNX Runtime at
+runtime (`dlopen`, per ONNX Runtime's ABI-stable C API) rather than linking it. OpenCV and Clipper
+symbols are hidden (`-Wl,--exclude-libs,ALL`); only the three JNI entry points are exported.
+`libonnxruntime.so` is redistributed unmodified; it links only `libc/libdl/liblog/libandroid/libm`.
 
 Chimahon's GPL-3.0 `paddle-ocr.zip` release is **not** used, redistributed or derived from. The
 consumer application (`:core:ocr`) is GPL-3.0-or-later as a whole; this artifact is Apache-2.0.

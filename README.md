@@ -1,57 +1,97 @@
 # komi-kun-ocr-models
 
-Reproducible, permissively-licensed native OCR artifact for **komi-kun**'s PaddleOCR pipeline
+Reproducible, permissively-licensed native OCR artifact for **komi-kun**'s OCR pipeline
 (`:core:ocr`, `mihon.core.ocr.paddle.PaddleOcrEngine`).
 
 This repository **is** the artifact's source. It builds `libpaddle_ocr.so` — a small JNI shim over
-[Paddle-Lite](https://github.com/PaddlePaddle/Paddle-Lite) + [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
-(Apache-2.0) — plus the converted models, and publishes them as the `ocr-models-v2` GitHub release
-together with a `manifest.json` carrying per-file SHA-256, size, ABI and SPDX id.
+[ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT) + [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)
+Apache-2.0 detection/recognition models — plus the ONNX models and the ONNX Runtime shared library,
+and publishes them as the `ocr-models-v3` GitHub release together with a `manifest.json` carrying
+per-file SHA-256, size, ABI and SPDX id.
 
 It replaces Chimahon's opaque `paddle-ocr.zip` (`v2.5`), whose `libpaddle_ocr.so` source is not
-published. Nothing here is derived from Chimahon: the JNI wrapper, the model staging and the
-build are ours; only PaddleOCR's Apache-2.0 `deploy/lite` post-processing is vendored.
+published. Nothing here is derived from Chimahon: the JNI shim, the model staging and the build are
+ours; only PaddleOCR's Apache-2.0 `deploy/lite` post-processing is vendored.
 
 ## Releases
 
-| Release | Models | Notes |
-|---|---|---|
-| **`ocr-models-v2`** (current) | **PP-OCRv5 mobile** — `ppocrv5_det.nb` + unified `ppocrv5_rec.nb` + `ppocrv5_dict.txt` | The latest PP-OCR generation that runs on Paddle-Lite. The recogniser is a **single** unified model covering Simplified/Traditional Chinese, Pinyin, English **and Japanese**. |
-| `ocr-models-v1` | PP-OCRv4 — `ppocrv4_det.nb` + `ppocrv4_japan_rec.nb` + `ppocrv4_japan_dict.txt` | Detection + a dedicated Japanese rec model. |
+| Release | Backend | Models | ABIs |
+|---|---|---|---|
+| **`ocr-models-v3`** (current) | **ONNX Runtime 1.31.0** | **PP-OCRv6 small** — `ppocrv6_small_det.onnx` + `ppocrv6_small_rec.onnx` + `ppocrv6_small_dict.txt` | `arm64-v8a`, `armeabi-v7a`, **`x86_64`** |
+| `ocr-models-v2` | Paddle-Lite v2.14-rc | PP-OCRv5 mobile (`ppocrv5_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
+| `ocr-models-v1` | Paddle-Lite v2.14-rc | PP-OCRv4 (`ppocrv4_*.nb`) | `arm64-v8a`, `armeabi-v7a` |
 
-Both releases use the **same** `libpaddle_ocr.so` sources and the same **Paddle-Lite v2.14-rc**
-runtime, and both are **arm-only** (`arm64-v8a`, `armeabi-v7a`).
+The `v1`/`v2` releases are kept intact for history. `v3` is a backend swap **and** a model bump:
+ONNX Runtime replaces Paddle-Lite (so all three ABIs — including `x86_64` — are first-class), and
+PP-OCRv6 small replaces PP-OCRv5 mobile.
 
-## Published artifacts (`ocr-models-v2`)
+## Published artifacts (`ocr-models-v3`)
 
 Release assets are a flat namespace (GitHub rewrites `/` to `.`), so the ABI is a name prefix:
 
 ```
-manifest.json
-arm64-v8a_libpaddle_ocr.so        arm64-v8a_libomp.so        arm64-v8a_libc++_shared.so
-armeabi-v7a_libpaddle_ocr.so      armeabi-v7a_libomp.so      armeabi-v7a_libc++_shared.so
-ppocrv5_det.nb
-ppocrv5_rec.nb
-ppocrv5_dict.txt
+manifest.json                                        app-paddle-manifest.json
+arm64-v8a_libpaddle_ocr.so      arm64-v8a_libonnxruntime.so      arm64-v8a_libomp.so   arm64-v8a_libc++_shared.so
+armeabi-v7a_libpaddle_ocr.so    armeabi-v7a_libonnxruntime.so    armeabi-v7a_libomp.so armeabi-v7a_libc++_shared.so
+x86_64_libpaddle_ocr.so         x86_64_libonnxruntime.so         x86_64_libomp.so      x86_64_libc++_shared.so
+ppocrv6_small_det.onnx
+ppocrv6_small_rec.onnx
+ppocrv6_small_dict.txt
 ```
 
-Base URL: `https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v2`
+Base URL: `https://github.com/komi-kun/komi-kun-ocr-models/releases/download/ocr-models-v3`
 Each entry's `path` in `manifest.json` / `app-paddle-manifest.json` is the asset name.
 
 App-side wiring (the patches that make `:core:ocr` consume this): **[INTEGRATION.md](INTEGRATION.md)**.
 
+## How ONNX Runtime is provisioned (the call, and why)
+
+**Decision: this release ships `libonnxruntime.so` per ABI and the app consumes it through the
+existing checksum-pinned build-time fetch (`:core:ocr:fetchPaddleNativeLibs` → `jniLibs/`). The app
+does *not* take `com.microsoft.onnxruntime:onnxruntime-android` as a Gradle dependency.**
+
+Weighed against the alternative (an ORT AAR on the app's classpath):
+
+| | ship the `.so` from this release (chosen) | ORT AAR as a Gradle dependency |
+|---|---|---|
+| Reproducibility | every byte the app builds against is in `paddle-manifest.json` with a SHA-256 and is **verified on fetch**; the release is frozen even if Maven Central changes | the effective runtime is whatever Gradle resolves; the AAR's `.so` is outside this repository's manifest and its hash is not pinned by us |
+| Simplicity | no new Gradle dependency, no version skew between the AAR's Java API (unused) and the C API the shim speaks | one dependency line, but drags in an unused Java/Kotlin wrapper and its transitive metadata |
+| Consistency | identical to how the previous Paddle-Lite artifact worked (and how `:core:dictionary`'s libs work) | new mechanism, second source of native libs |
+| Cost | the AAR is unpacked by this build and republished byte-for-byte; APK size is the same either way | — |
+
+Being able to state "the app runs ORT 1.31.0 whose `arm64-v8a` `libonnxruntime.so` is
+`8005a741…`, re-verified on every fetch" is worth more than saving one dependency line, and it keeps
+the entire native surface of an opt-in feature inside one auditable manifest.
+
+### Runtime dependencies of the shim
+
+* **`libonnxruntime.so`** — not *linked*, **loaded at runtime** (`dlopen` + `OrtGetApiBase()`, see
+  `src/ort_runtime.h`). ONNX Runtime's C API is ABI-stable and explicitly designed for this, so the
+  shim has no `DT_NEEDED` on ORT: when the runtime is missing, `dlopen` fails, `Engine::Init()`
+  returns `false`, and OCR degrades gracefully exactly as before. Search order: `$KOMIKUN_ORT_LIB`
+  → `libonnxruntime.so` next to the shim (the `filesDir/…/lib/<abi>/` layout) → the bare soname (the
+  APK `jniLibs` layout).
+* **`libc++_shared.so`** — the shim is built with `-DANDROID_STL=c++_shared`. ORT's own Android
+  runtime is *not* (it links `libc/libdl/liblog/libandroid/libm` only, with libc++ statically
+  linked), so ORT adds no STL dependency of its own. As before, the app's AGP already packages the
+  NDK copy for `:core:dictionary`, which is why the **app** manifest omits this entry (a second copy
+  fails the app merge); the release still publishes it for completeness.
+* **`libomp.so`** — still required, but no longer by ORT: opencv-mobile's `parallel_for_` calls
+  `omp_get_thread_num` / `omp_get_max_threads`. ORT's own threading is its intra-op pool
+  (`SetIntraOpNumThreads`), not OpenMP.
+
 ## What `libpaddle_ocr.so` implements
 
 The exact JNI surface declared by
-`core/ocr/src/main/java/mihon/core/ocr/paddle/PaddleOcrEngine.kt`:
+`core/ocr/src/main/java/mihon/core/ocr/paddle/PaddleOcrEngine.kt` — **unchanged** from v1/v2:
 
 | Symbol | Behaviour |
 |---|---|
-| `Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeInit(detParam, detBin, recParam, recBin, dict, threads)` | Loads the detection + recognition models and the dictionary. `detBin`/`recBin` are accepted for interface compatibility and used only as a fallback path. |
+| `Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeInit(detParam, detBin, recParam, recBin, dict, threads)` | Loads the detection + recognition ONNX graphs and the dictionary. `detBin`/`recBin` are accepted for interface compatibility and used only as a fallback path. |
 | `Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeProcess(bitmap, thresh, boxThresh, unclipRatio, filterFurigana, threads)` | Runs DB detection + CRNN recognition over an `ARGB_8888` `Bitmap` and returns the `TIMING|`/`LINE|` protocol string. |
-| `Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeRelease()` | Frees the predictors. |
+| `Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeRelease()` | Frees the sessions. |
 
-Output protocol (parsed by `PaddleOcrEngine.parseOutput`):
+Output protocol (parsed by `PaddleOcrEngine.parseOutput`) — also byte-for-byte unchanged:
 
 ```
 TIMING|<total>|<prep>|<det>|<post>|<crop>|<rec>|<rawBoxCount>
@@ -60,129 +100,136 @@ LINE|<order>|<score>|<L>,<T>,<R>,<B>|<tlx>,<tly>,<trx>,<try>,<brx>,<bry>,<blx>,<
 
 All coordinates are normalised to `[0,1]` over the input image; the quad is `tl,tr,br,bl` and drives
 `PaddleOcrEngine.quadRotation`. `isFurigana` is always `0` — ruby filtering is the merger's job.
-
-The engine is **model-agnostic**: swapping v4 → v5 changed only the three model file names and their
-contents, not the `.so`, the JNI surface, the input shape or the dictionary convention.
+Because the JNI names, parameter order, return types and the protocol text are identical, **the
+Kotlin layer needs no logic change**: only the model file names and the release URL move.
 
 ## Pipeline
 
-DB text detection → per-box perspective crop (`GetRotateCropImage`, which transposes tall crops so
-vertical Japanese columns are read horizontally) → CRNN + CTC recognition, using a **single shared
-recognition width per page** derived from the page's `max_wh_ratio`, exactly like PaddleOCR's
-`predict_rec`. Both PP-OCRv4 and PP-OCRv5 recognition models are CTC (`rec_image_height = 48`).
+```
+page (BGR)
+  → DetResize: longest side ≤ 960, both sides rounded to a multiple of 32
+  → NormalizeImage: /255, then (x - mean)/std, mean [0.485,0.456,0.406], std [0.229,0.224,0.225]
+  → PP-OCRv6-small det → probability map → threshold/dilate → DB box extraction (PaddleOCR
+    db_post_process, clipped by Clipper) → FilterTagDetRes
+  → reading order (manga: right-to-left columns for vertical text)
+  → per-box perspective crop (GetRotateCropImage, which transposes tall crops 90° CCW so vertical
+    Japanese columns are read horizontally — PaddleOCR's own convention)
+  → per-crop resize to rec_image_height 48, width ceil(48·w/h) capped at 3200
+  → NormalizeImage: (x/255 - 0.5) / 0.5
+  → PP-OCRv6-small rec → greedy CTC decode (dict index 0 = blank, trailing space class)
+```
 
-### Paddle-Lite shape handling (important)
+Preprocessing is byte-for-byte the validated benchmark's (`/tmp/opencode/ocr-bench/common.py`) — see
+[Validation](#validation). One deliberate difference from `ocr-models-v1`/`v2`:
 
-Paddle-Lite's mobile predictor returns **wrong results** (and can segfault) when a `Run()` uses an
-input shape other than the previous one. Reproduced on x86_64 with `libpaddle_light_api_shared.so`
-(v2.14-rc): the first inference after loading a model is always correct, subsequent inferences with a
-changed shape are not.
+* **No shared recognition width.** Paddle-Lite's mobile predictor returned wrong results when a
+  `Run()` used a different input shape than the previous one, so the v1/v2 engine forced one
+  recognition width per page and rebuilt predictors on shape changes. ONNX Runtime handles dynamic
+  shapes correctly, so every crop is now recognised at its own natural width — which is also exactly
+  what the benchmark measured. The `rec_image_height` decoupling/session-rebuild machinery is gone.
 
-The engine therefore:
+## Model-agnostic by construction
 
-* derives one recognition width for the whole page and pads every crop to it (upstream behaviour), and
-* rebuilds a predictor whenever the next inference needs a different shape — loading a model costs
-  ~5–10 ms, so this is cheaper than risking a corrupt result.
-
-If you change the engine, keep those invariants.
-
-## ABI support
-
-| ABI | Status | Why |
-|---|---|---|
-| `arm64-v8a` | shipped | Paddle-Lite prebuilt + `valid_targets=arm` models |
-| `armeabi-v7a` | shipped | Paddle-Lite prebuilt + `valid_targets=arm` models |
-| `x86_64` | **not shipped** | Paddle-Lite publishes **no Android x86_64 prebuilt** (only armv7/armv8), and `opt`-converted `.nb` models are target-specific: a `valid_targets=arm` model aborts on x86 and vice-versa. Shipping an ARM-only `.so` under an `x86_64` entry would crash, so the ABI is omitted until both halves exist. |
-
-Adding `x86_64` requires (a) building Paddle-Lite from source for Android x86_64 and (b) publishing a
-second, `valid_targets=x86` model set plus an ABI-aware model selection step in `ModelDownloader` /
-`PaddleOcrEngine`.
+The ONNX graphs are architecture-independent, so **one model set serves all three ABIs** — the
+per-ABI `valid_targets` problem that forced v1/v2 to be ARM-only does not exist here.
 
 ## Models
 
-`ocr-models-v2` ships the **official PaddlePaddle PP-OCRv5 mobile** models, already converted to the
-Paddle-Lite naive-buffer format **for Paddle-Lite v2.14-rc** (the `.nb` header literally records
-`v2.14-rc`). They come from the `feature/paddle-x` branch of
-[`Paddle-Lite-Demo`](https://github.com/PaddlePaddle/Paddle-Lite-Demo) — the "PaddleX-Lite-Deploy"
-of PaddleOCR's on-device deployment guide.
+`ocr-models-v3` ships the official **PP-OCRv6 small** ONNX exports from the `PaddlePaddle` HF org,
+pinned to a revision in `deps.lock.json`:
 
 | File | Source | Notes |
 |---|---|---|
-| `ppocrv5_det.nb` | `PP-OCRv5_mobile_det.nb` | PP-OCRv5 mobile DB detector (handwriting, vertical, rotated, curved, multi-language). |
-| `ppocrv5_rec.nb` | `PP-OCRv5_mobile_rec.nb` | **Unified** PP-OCRv5 mobile recogniser: Simplified + Traditional Chinese, Pinyin, English and **Japanese** in one model (`rec_image_height = 48`, output classes `C = 18385`). This is the PP-OCRv5 Japanese model — there is no separate `japan_PP-OCRv5_*` rec. |
-| `ppocrv5_dict.txt` | `ppocr_keys_ocrv5.txt` | 18 383 entries. The engine prepends `#` (CTC blank) and appends a space class, exactly like PaddleOCR's `CTCLabelDecode`. |
+| `ppocrv6_small_det.onnx` | `PaddlePaddle/PP-OCRv6_small_det_onnx@28fe5895` | PP-OCRv6 small DB text detector. `sha256 d73e0058…`, 9.4 MiB. |
+| `ppocrv6_small_rec.onnx` | `PaddlePaddle/PP-OCRv6_small_rec_onnx@b8f84f0b` | PP-OCRv6 small recogniser, `rec_image_height = 48`, 18 710 output classes. `sha256 5435fd74…`, 20.2 MiB. |
+| `ppocrv6_small_dict.txt` | `PostProcess.character_dict` of the same `inference.yml`, extracted by `tools/extract_dict.py` | 18 708 entries (**180 kana**, 15 565 han). The engine prepends `#` (CTC blank) and appends a space class. `sha256 b5f2bfe2…`. |
 
-### Why not convert them ourselves?
-
-PP-OCRv5's official inference models are published only as **PaddlePaddle 3.x PIR**
-(`inference.json` + `inference.pdiparams`), which Paddle-Lite's `opt` 2.14-rc **cannot parse** — it
-requires a `.pdmodel` and fails with `Unsupported model format!` / `idx >= blocks.size()`
-([Paddle-Lite#10684](https://github.com/PaddlePaddle/Paddle-Lite/issues/10684)). The only
-Paddle-Lite-compatible PP-OCRv5 models are PaddlePaddle's own pre-converted `.nb`, which we consume
-byte-for-byte and pin by SHA-256. No `manga_*_fp16` fine-tune is used (its provenance/licence is
-unverified, implementation contract §8.3).
+**Why `small` and not `tiny`:** PP-OCRv6 tiny's recogniser has no kana at all, so it cannot read
+Japanese (the benchmark scored it at 3.6 % exact match / 78 % CER on the manga gold set). Small is
+the cheapest v6 tier that does (86 hiragana + 94 katakana).
 
 ## Build
 
 ```bash
-./build.sh            # Android .so for every supported ABI + models + manifests
-./build.sh --host     # also build the off-device harness (toolchain check)
+./build.sh                 # Android .so for every supported ABI + models + manifests
+./build.sh --host          # also build the off-device conformance harness
 ./build.sh --abi arm64-v8a
+./build.sh --manifest-only # regenerate the manifests from an existing out/
 ./build.sh --clean
 ```
 
-Requirements: `cmake >= 3.22`, `ninja`/`make`, `curl`, `unzip`, and the **Android NDK
-`29.0.14206865`** (`ANDROID_NDK_HOME`, or `$ANDROID_SDK_ROOT/ndk/...`). Everything else is
-downloaded and pinned by `deps.lock.json`.
+Requirements: `cmake >= 3.22`, `ninja`/`make`, `curl`, `unzip`, `python3` (+ `pyyaml`), and the
+**Android NDK `29.0.14206865`** (`ANDROID_NDK_HOME`, or `$ANDROID_SDK_ROOT/ndk/...`). Everything else
+is downloaded and pinned by `deps.lock.json`.
 
 `build.sh` writes:
 
-* `out/lib/<abi>/{libpaddle_ocr.so,libomp.so,libc++_shared.so}`
-* `out/models/{ppocrv5_det.nb,ppocrv5_rec.nb,ppocrv5_dict.txt}`
+* `out/lib/<abi>/{libpaddle_ocr.so,libonnxruntime.so,libomp.so,libc++_shared.so}`
+* `out/models/{ppocrv6_small_det.onnx,ppocrv6_small_rec.onnx,ppocrv6_small_dict.txt}`
 * `out/manifest.json` — the release manifest, consumed at runtime by `ModelDownloader`
 * `out/app-paddle-manifest.json` — the copy that belongs at `core/ocr/paddle-manifest.json`
-
-`libomp.so` and `libc++_shared.so` come from the NDK (Apache-2.0 WITH LLVM-exception); `libc++_shared.so`
-is identical to the one AGP already packages for a `-DANDROID_STL=c++_shared` module — see the app
-integration notes in `INTEGRATION.md`.
+* `out/paddle_ocr_host` — the host conformance harness (`--host`)
 
 ## Validation
 
-The JNI shim, the DB/CRNN orchestration and the model pipeline are identical to `ocr-models-v1`,
-which was validated on a synthetic page (horizontal and vertical Japanese) with the host harness.
+Validation was done on the host with the **shipped engine sources**, built for Linux x86_64 against
+the **official Linux ONNX Runtime 1.31.0** build and the **same ONNX model bytes** the release
+publishes. This is possible precisely because ORT is portable and the graphs are
+architecture-independent — the one thing the Paddle-Lite artifact could never do (its `.nb` models
+were `valid_targets=arm` and aborted on x86_64).
 
-`ocr-models-v2` was validated as follows:
+`tools/parity_check.py` drives `paddle_ocr_host` over the PP-OCRv6 benchmark's real manga crops and
+pages (`/tmp/opencode/ocr-bench`, 5 Japanese titles, 30 pages, 752 saved crops per condition) and
+diffs against the recorded PP-OCRv6-small results:
 
-* **Model contract (executed here, on the host):** the official `PP-OCRv5_mobile_rec` model, run
-  through ONNX Runtime, has input `[N,3,48,W]` and output `[N,T,18385]` — confirming the unchanged
-  `rec_image_height = 48` and the `['blank'] + ppocr_keys_ocrv5 + [' ']` dictionary convention the
-  engine assumes — and recognised four synthetic Japanese lines (kanji, hiragana, katakana) exactly.
-* **Runtime match:** the `.nb` files were produced by Paddle-Lite **v2.14-rc**'s `opt` (the header
-  records the version) and are consumed by the **same** v2.14-rc `libpaddle_api_light_bundled.a`
-  this repository links; PaddlePaddle's own on-device demo runs these exact files on-device.
+```bash
+./build.sh --host
+python3 tools/parity_check.py --host out/paddle_ocr_host --models out/models \
+    --bench /tmp/opencode/ocr-bench --cond orig   --mode crops
+python3 tools/parity_check.py --host out/paddle_ocr_host --models out/models \
+    --bench /tmp/opencode/ocr-bench --cond orig   --mode detect
+python3 tools/parity_check.py --host out/paddle_ocr_host --models out/models \
+    --bench /tmp/opencode/ocr-bench --cond orig   --mode pages
+```
 
-**Not validated:** `ocr-models-v2` was **not** executed on an ARM device here (no device/emulator
-available), and the host conformance harness *cannot* stand in this time: the published models are
-`valid_targets=arm`, so loading them under the x86_64 host runtime aborts by design (confirmed:
-`SIGABRT`) — the same target-specificity documented under ABI support. `build.sh --host` therefore
-only builds the harness (toolchain check), it does not run it. Re-run the v5 models on a real
-arm64 device (or add an `x86` model set) before relying on them in production.
+| Check | Result |
+|---|---|
+| **Recognition parity, `orig` crops** (`paddle_ocr_host parity`, exactly the same crop images the benchmark scored) | **752 / 752 exact byte match (100 %)**, CER 0.00 % |
+| Recognition parity, `ai` (AI-upscaled) crops | 752 / 752 exact byte match (100 %), CER 0.00 % |
+| Recognition parity, `classical` (Lanczos) crops | 752 / 752 exact byte match (100 %), CER 0.00 % |
+| **Detection parity** vs the benchmark's own PP-OCRv6-small detector (`det_stats`) | native 538 boxes vs reference 542; **23 / 30 pages identical**, max abs diff 2, mean abs diff 0.33 |
+| End-to-end on 30 pages (`paddle_ocr_host full`) | 530 lines, sane Japanese (e.g. `先輩たちに`, `何が始まるんだろう`, `一年組の十一月`) |
+| End-to-end latency (Linux x86_64, 4 threads, 30 pages) | det ≈ 58–70 ms, rec ≈ 8–151 ms, ~77–234 ms per page |
+
+The 752-crop set is the benchmark's **v5** detector crop set; the IoU-matched text agreement against
+it (81.4 % exact, 5.7 % CER) therefore measures the v5 → v6 detector change, not an engine
+difference — which is why the native-vs-reference-v6-small box comparison above is the meaningful
+detection parity number.
+
+**Not validated here:** the Android `.so`s were cross-compiled and verified to exist, be
+`ELF … ARM aarch64`/`ARM`/`x86-64`, and match `sha256` — but they were **not executed on an Android
+device or emulator** (none is available). The engine logic and the model bytes *are* host-validated
+above; only the NDK toolchain output and the JNI glue are device-untested.
 
 ## Reproducibility
 
-The build is fully scripted and every input is pinned in `deps.lock.json`, but the `.so` outputs are
-**not** byte-identical across runs (NDK artifacts carry build ids). The models, however, *are* the
-fixed official `.nb` bytes, pinned by SHA-256. The manifest pins the bytes that were actually
-published, and both consumers — the Gradle `fetchPaddleNativeLibs` task and the app's
-`ModelDownloader` — verify SHA-256 on every fetch. After republishing, regenerate both manifests with
-`./build.sh --manifest-only` and update the app's `core/ocr/paddle-manifest.json`.
+The build is fully scripted and every input is pinned in `deps.lock.json`. `libonnxruntime.so` and
+the three model files are republished **byte-for-byte** (they are upstream builds/downloads, verified
+by SHA-256 at fetch time), so those are deterministic. Our own `libpaddle_ocr.so` and the NDK
+`libomp.so`/`libc++_shared.so` are **not** byte-identical across runs (NDK artifacts carry build
+ids). The manifest pins the bytes that were actually published, and both consumers — the Gradle
+`fetchPaddleNativeLibs` task and the app's `ModelDownloader` — verify SHA-256 on every fetch. After
+republishing, regenerate both manifests with `./build.sh --manifest-only` and update the app's
+`core/ocr/paddle-manifest.json`.
 
 ## Licensing
 
-* This repository's own code (`src/`, `build.sh`, `CMakeLists.txt`): **Apache-2.0**.
+* This repository's own code (`src/`, `tools/`, `build.sh`, `CMakeLists.txt`): **Apache-2.0**.
 * Vendored `third_party/paddleocr_lite/`: PaddleOCR `deploy/lite`, Apache-2.0.
 * `third_party/clipper/`: Clipper 6.4.2, Boost Software License 1.0.
-* Inputs: Paddle-Lite and PaddleOCR PP-OCRv5 models (Apache-2.0), opencv-mobile/OpenCV (Apache-2.0),
-  Android NDK runtime libraries (Apache-2.0 WITH LLVM-exception).
+* ONNX Runtime 1.31.0 (republished `libonnxruntime.so`): **MIT**.
+* PP-OCRv6 small models + dictionary: Apache-2.0.
+* opencv-mobile/OpenCV: Apache-2.0.
+* Android NDK runtime libraries: Apache-2.0 WITH LLVM-exception.
 
 See `LICENSE` and `NOTICE`.

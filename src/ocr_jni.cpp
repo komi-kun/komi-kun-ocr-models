@@ -8,6 +8,11 @@
 //                                      numThreads): String
 //   private external fun nativeRelease()
 //
+// The JNI names, parameter order and return types are byte-for-byte the same as the Paddle-Lite
+// artifact, as is the `TIMING|`/`LINE|` protocol the engine returns, so the Kotlin side needs no
+// change. Only the inference backend differs: the engine now runs the ONNX models through ONNX
+// Runtime, loaded dynamically (`src/ort_runtime.h`).
+//
 // The returned String is the `TIMING|`/`LINE|` text protocol parsed by
 // `PaddleOcrEngine.parseOutput`. A single process-wide engine instance is kept (matching the
 // Kotlin side's companion-wide locking), guarded by a mutex.
@@ -23,6 +28,7 @@
 #include <sys/stat.h>
 
 #include "ocr_engine.h"
+#include "ort_runtime.h"
 
 #define LOG_TAG "paddle_ocr"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -78,8 +84,11 @@ Java_mihon_core_ocr_paddle_PaddleOcrEngine_nativeInit(  // NOLINT(readability-id
 
   const bool ok = g_engine.Init(det, rec, dict, static_cast<int>(num_threads));
   if (!ok) {
-    LOGE("nativeInit failed (det=%s rec=%s dict=%s)", det.c_str(), rec.c_str(), dict.c_str());
+    LOGE("nativeInit failed (det=%s rec=%s dict=%s) runtime=%s", det.c_str(), rec.c_str(),
+         dict.c_str(), komikun::ocr::ort::LoadError().c_str());
     g_engine.Release();
+  } else {
+    LOGI("onnxruntime %s", komikun::ocr::ort::RuntimeVersion().c_str());
   }
   return ok ? JNI_TRUE : JNI_FALSE;
 }

@@ -1,30 +1,57 @@
-// SPDX-License-Identifier: Apache-2.0
-// Pinned inputs for the PaddleOCR native artifact. `build.sh` fetches exactly these URLs;
-// `sha256` values were recorded from the artifacts actually used to produce `ocr-models-v2`.
 {
-  "release": "ocr-models-v2",
-  "paddle_lite": {
-    "version": "v2.14-rc",
-    "repository": "https://github.com/PaddlePaddle/Paddle-Lite",
-    "license": "Apache-2.0",
+  "_comment": [
+    "Pinned inputs for the OCR native artifact (ocr-models-v3).",
+    "build.sh fetches exactly these URLs and verifies every SHA-256 before use; the values were",
+    "recorded from the artifacts actually used to produce ocr-models-v3.",
+    "This file must stay valid JSON (build.sh parses it) - use `_comment` keys, not // comments."
+  ],
+  "release": "ocr-models-v3",
+  "onnxruntime": {
+    "version": "1.31.0",
+    "repository": "https://github.com/microsoft/onnxruntime",
+    "license": "MIT",
+    "c_api_version": 31,
+    "_comment": [
+      "Inference backend. The shim does NOT link libonnxruntime.so: src/ort_runtime.cpp dlopen()s",
+      "it and resolves the ABI-stable C API through OrtGetApiBase() (see src/ort_runtime.h). That is",
+      "why the shim keeps loading - and Engine::Init keeps returning false - when the runtime is",
+      "absent, exactly like the Paddle-Lite artifact.",
+      "Android: a single multi-ABI AAR from Maven Central; the per-ABI libonnxruntime.so bytes",
+      "inside it are what gets published and are pinned separately below.",
+      "The Android runtime links only libc/libdl/liblog/libandroid/libm (libc++ is statically",
+      "linked), so it adds NO libc++_shared.so dependency of its own; the NDK libc++_shared.so is",
+      "needed only by our own shim (and by opencv-mobile's OpenMP use of libomp.so)."
+    ],
+    "android_aar": {
+      "url": "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/1.31.0/onnxruntime-android-1.31.0.aar",
+      "sha256": "72683787a80d0608a3121b967d8e1239aef48286826661c953211626690540a7",
+      "size": 55138854
+    },
+    "headers": {
+      "source": "headers/onnxruntime_c_api.h inside android_aar",
+      "sha256": "72683787a80d0608a3121b967d8e1239aef48286826661c953211626690540a7"
+    },
     "android": {
       "arm64-v8a": {
-        "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.android.armv8.clang.c++_shared.with_extra.tar.gz",
-        "sha256": "cb6a03060fa10676f7f599aed41efdcc48bbcee9779c24499afcde111313be03"
+        "source": "jni/arm64-v8a/libonnxruntime.so inside android_aar",
+        "sha256": "8005a741e57117b4d7b476417706c0e9af13cf1b89db47e60f0cbc56e1af91e0",
+        "size": 34208680
       },
       "armeabi-v7a": {
-        "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.android.armv7.clang.c++_shared.with_extra.tar.gz",
-        "sha256": "884ac68909e76c79a1cf4be276dbdd7c55633bf2e8052e8594a2041844ff63b0"
+        "source": "jni/armeabi-v7a/libonnxruntime.so inside android_aar",
+        "sha256": "2a63f9a56b211511209dbf4b5bc143f18d0b365977dd7a0afd57d95c85479af6",
+        "size": 24182012
       },
       "x86_64": {
-        "url": null,
-        "sha256": null,
-        "note": "Paddle-Lite publishes no Android x86_64 prebuilt (see README: ABI support)."
+        "source": "jni/x86_64/libonnxruntime.so inside android_aar",
+        "sha256": "068896846a7fe679cf780c1c532745286d9ef2e469f3dbde5bb9cf2c02095b18",
+        "size": 40827944
       }
     },
-    "host_x86_64_validation": {
-      "url": "https://github.com/PaddlePaddle/Paddle-Lite/releases/download/v2.14-rc/inference_lite_lib.x86.linux.tar.gz",
-      "sha256": "a6a8f7f45b69479f752f7e52eee5836eb8d05573a3d7f078063b93634b5f06aa"
+    "linux_x86_64": {
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-linux-x64-1.31.0.tgz",
+      "sha256": "cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57",
+      "size": 11408003
     }
   },
   "opencv_mobile": {
@@ -35,7 +62,7 @@
       "url": "https://github.com/nihui/opencv-mobile/releases/download/v36/opencv-mobile-4.13.0-android.zip",
       "sha256": "56735469e0c344253122cbc66f5e69e5f3b2c131a0f892eb68fa5530be763b83"
     },
-    "host_x86_64_validation": {
+    "linux_x86_64": {
       "url": "https://github.com/nihui/opencv-mobile/releases/download/v36/opencv-mobile-4.13.0-ubuntu-2404.zip",
       "sha256": "f556a633db7addf1d4c8ea0dd4fb7a431ef9a3f32f7d9c028e702d2779dac0ed"
     }
@@ -48,45 +75,48 @@
     "url_cpp": "https://paddle-inference-dist.cdn.bcebos.com/PaddleLite/Clipper/clipper.cpp",
     "sha256_cpp": "1011595441412e429f47630578f5caaecdc5a4108f9ed05a77b848d952e5127c"
   },
-  "paddleocr": {
-    "repository": "https://github.com/PaddlePaddle/PaddleOCR",
-    "reference_revision": "v3.0.0 (PP-OCRv5)",
-    "license": "Apache-2.0",
-    "note": [
-      "PP-OCRv5's official inference models are published only as PaddlePaddle 3.x PIR",
-      "(inference.json + inference.pdiparams), which Paddle-Lite's `opt` 2.14-rc cannot parse",
-      "(it requires a .pdmodel). We therefore consume PaddlePaddle's own pre-converted",
-      "Paddle-Lite naive-buffer models, built for Paddle-Lite v2.14-rc, from Paddle-Lite-Demo's",
-      "`feature/paddle-x` branch (PaddleOCR's on-device deployment guide). Their .nb header",
-      "records 'v2.14-rc', matching the runtime this build links. Published under flat names",
-      "ppocrv5_det.nb / ppocrv5_rec.nb / ppocrv5_dict.txt; the extracted-file sha256 is what the",
-      "release manifest pins."
+  "models": {
+    "_comment": [
+      "Official PaddlePaddle PP-OCRv6 small ONNX exports. v6 small is the smallest v6 tier whose",
+      "recogniser still covers Japanese kana (86 hiragana + 94 katakana); v6 tiny has none and must",
+      "not be used. The ONNX graphs are architecture-independent, so one model set runs on every ABI.",
+      "`revision` is the HuggingFace commit the bytes were fetched from."
     ],
-    "models": {
-      "detection": {
-        "name": "PP-OCRv5_mobile_det.nb",
-        "url": "https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models/PP-OCRv5_mobile_det.tar.gz",
-        "sha256_targz": "18be2328b19936bb8bbef48ffeb3f5214e58c26acd47bb64681f2f52dc7b8fa4",
-        "sha256_extracted": "bee84fdb3d7c5f312a797da81f2dd44c89088c08e1f58a51044a823cddfbd90c"
-      },
-      "recognition": {
-        "name": "PP-OCRv5_mobile_rec.nb",
-        "url": "https://paddlelite-demo.bj.bcebos.com/paddle-x/ocr/models/PP-OCRv5_mobile_rec.tar.gz",
-        "sha256_targz": "6385dad9a2272b0180b9f44f49c08feed5ffa777a4f8658e25d9db39636ab2b3",
-        "sha256_extracted": "9d073b3ee01deee358bf929dd8952d4d355c9545f4a93d8070605581b4c21c0c",
-        "note": "Unified recogniser: Simplified/Traditional Chinese, Pinyin, English and Japanese in one model (the v5 Japanese model)."
-      },
-      "dictionary": {
-        "name": "ppocr_keys_ocrv5.txt",
-        "url": "https://paddlelite-demo.bj.bcebos.com/demo/ocr/labels/labels.tar.gz",
-        "sha256_targz": "deaf9d44b671ee4edb3a2e1747844624e211d1a24ef641e8336147fa046edb8a",
-        "sha256_extracted": "17665d27ed39f0deb82007859992d626d3105d0ee4578c120b7c72138dc04d05"
-      }
+    "det": {
+      "repo": "PaddlePaddle/PP-OCRv6_small_det_onnx",
+      "revision": "28fe5895c24fd108c19eb3e8479f4ab385fbfc62",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/28fe5895c24fd108c19eb3e8479f4ab385fbfc62/inference.onnx",
+      "published_as": "ppocrv6_small_det.onnx",
+      "sha256": "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
+      "size": 9880512,
+      "yaml_sha256": "193f435274bf9f0b5f71a929bbfbcf148282df7e633b34e7c373e8f44741b516",
+      "license": "Apache-2.0"
+    },
+    "rec": {
+      "repo": "PaddlePaddle/PP-OCRv6_small_rec_onnx",
+      "revision": "b8f84f0b80c529de40b4fbb3544b84fa7233a513",
+      "url": "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/b8f84f0b80c529de40b4fbb3544b84fa7233a513/inference.onnx",
+      "published_as": "ppocrv6_small_rec.onnx",
+      "sha256": "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
+      "size": 21159378,
+      "yaml_sha256": "ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1",
+      "license": "Apache-2.0",
+      "output_classes": 18710
+    },
+    "dict": {
+      "derived_from": "PostProcess.character_dict of PaddlePaddle/PP-OCRv6_small_rec_onnx@b8f84f0b80c529de40b4fbb3544b84fa7233a513 (inference.yml)",
+      "extracted_by": "tools/extract_dict.py",
+      "published_as": "ppocrv6_small_dict.txt",
+      "sha256": "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+      "entries": 18708,
+      "kana": 180,
+      "han": 15565,
+      "license": "Apache-2.0"
     }
   },
   "android_ndk": {
     "version": "29.0.14206865 (r29)",
-    "provided_runtime_libraries": ["libomp.so", "libc++_shared.so"],
+    "provided_runtime_libraries": ["libc++_shared.so", "libomp.so"],
     "license": "Apache-2.0 WITH LLVM-exception"
   }
 }
